@@ -1,0 +1,2780 @@
+---
+title: "memoria_v4"
+author: "Catalina Leiva"
+format: html
+editor: visual
+---
+
+#Librerías
+
+```{r}
+library(tidyverse)
+library(broom)
+library(readr)
+library(DataExplorer)
+library(gridExtra)
+library(olsrr)
+library(tidymodels)
+library(discrim)
+library(caTools)
+library(pROC)
+library(dplyr)
+library(stargazer)
+library(readxl)
+library(NbClust)
+library(factoextra)
+library(e1071)
+library(tree)
+library(MASS)
+library(caret)
+library(klaR)
+library(stringr)
+library(data.table)
+library(zoo)
+library(fabricatr)
+library(tibble)
+library(tseries)
+library(fpp3)
+library(forecast)
+library(tsfgrnn)
+library(Metrics)
+```
+
+#Carga de datos
+
+```{r}
+library(readxl)
+set.seed(1234)
+precios<-read_excel("datos_chile_13marzo2024.xlsx",sheet=1, na="-",col_types =c("date",rep("numeric",216))) #precios diarios
+vt<-read_excel("datos_chile_13marzo2024.xlsx",sheet=2, na="-") #volúmenes de transacción en miles de clp
+#deja en escala normal (no miles) vt
+vt<-cbind(vt[1],vt[2:length(vt)]*1000)
+#precios_m<-read_excel("bbdd.xlsx",sheet=3, na="-") #precios mensuales
+
+
+#cambio de nombre columnas df precios
+for (i in 2:length(precios))
+{
+  colnames(precios)[i]<-str_sub(colnames(precios[i]),42)
+  colnames(precios)[i]<-str_replace(colnames(precios[i]),'-','_')
+  colnames(precios)[i]<-str_replace(colnames(precios[i]),' ','')
+  #cambia "-" por "_" y espacios por "" porque da error más adelante
+}
+#cambio de nombre columnas df vt
+for (i in 2:length(vt))
+{
+  colnames(vt)[i]<-colnames(precios[i])
+}
+
+
+#quita la primera fila para que al sacar la diferencia para los retornos quede igual en fechas
+vt<-vt[-1,]
+```
+
+```{r}
+#para ver la cantidad de valores que faltan
+plot_intro(precios)
+plot_intro(vt)
+```
+
+#Cálculo de los retornos
+
+```{r}
+#se crea el df para los retornos
+retornos<-vt
+
+#cálculo de los retornos
+for (j in 2:length(precios))
+{
+  for (i in 2:nrow(precios))
+  {
+    retornos[i-1,j]<-log(precios[i,j]/precios[i-1,j])
+  }
+}
+```
+
+#Limpieza de datos
+
+```{r}
+#función que cuenta NA en un df
+na_count<-sapply(retornos, function(y) sum(length(which(is.na(y)))))
+na_count<-data.frame(na_count)
+
+#filtra las acciones que tienen demasiados NA (se dejan las columnas con menos de 80% NA)
+least_na<-filter(na_count,na_count<nrow(retornos)*0.8) 
+
+#hace que los nombres de las filas sean parte de la data
+least_na<-tibble::rownames_to_column(least_na, "nombre")
+
+#df con menos de 1700 NA
+retornos2<-retornos[,least_na$nombre]
+vt2<-vt[,least_na$nombre]
+
+#corte de data para calcular Amihud (2010-2017)
+retornos2_2<-retornos2[(match("2010-01-01",retornos$Fecha)):(match("2017-12-29",retornos$Fecha)),]
+vt2_2<-vt2[(match("2010-01-01",retornos$Fecha)):(match("2017-12-29",retornos$Fecha)),]
+```
+
+```{r}
+#elimina acciones que dejan de cotizar
+#2018 a 2021 (inclusive)
+corte<-retornos2[(match("2018-01-01",retornos2$Fecha)):(match("2021-12-31",retornos2$Fecha)),]
+colSums(is.na(corte))
+colSums(is.na(retornos2_2))
+```
+
+```{r}
+retornos2$CIC<-NULL
+retornos2_2$CIC<-NULL
+vt2$CIC<-NULL
+vt2_2$CIC<-NULL
+
+retornos2$HIPERMARC<-NULL
+retornos2_2$HIPERMARC<-NULL
+vt2$HIPERMARC<-NULL
+vt2_2$HIPERMARC<-NULL
+```
+
+#Amihud
+
+```{r}
+#Amihud
+
+#crear df
+amihud_diario<-retornos2_2
+
+#cálculo Amihud diario
+for (j in 2:length(amihud_diario))
+{
+  for (i in 1:nrow(amihud_diario))
+  {
+    amihud_diario[i,j]<-abs(retornos2_2[i,j])/vt2_2[i,j]
+  }
+}
+
+#reemplaza los inf por NA
+amihud_diario<-do.call(data.frame,lapply(amihud_diario,function(x) replace(x, is.infinite(x), NA)))
+```
+
+```{r}
+#cálculo Amihud
+
+#crear df
+amihud<-amihud_diario[-(2:nrow(amihud_diario)),][,-1] 
+#quita de la fila 2 hacia abajo de am_d y la primera columna de fecha
+
+
+for (i in 2:length(amihud_diario))
+{
+    amihud[1,i-1]<-sum(amihud_diario[i],na.rm=TRUE)/colSums(!is.na((amihud_diario[i]))) #colSums(!is.na(())) da el numero de non na por columna (no es nrow, sino que las que no son na)
+}
+
+#transpone el df que contiene los Amihud dejandolos en una columna
+amihud_t<- as.data.frame(t(amihud))
+colnames(amihud_t)[1]<-"am"
+
+#se omiten las que tienen amihud=0
+amihud_t<-subset(amihud_t,amihud_t$am>0)
+```
+
+```{r}
+#cuenta non na
+colSums(!is.na((amihud_diario)))
+```
+
+#Quintiles
+
+```{r}
+#cuartiles
+quantile(amihud_t$am)
+```
+
+```{r}
+#quintiles
+#agrega una columna al df amihud_t con el quintil al que pertenece
+amihud_q<-cbind(amihud_t,ntile(amihud_t$am, 5))
+colnames(amihud_q)[2]<-"quintil"
+#5 = más ilíquido
+```
+
+```{r}
+#separa por quintiles en dfs
+aq1<-subset(amihud_q, quintil == 1)
+aq2<-subset(amihud_q, quintil == 2)
+aq3<-subset(amihud_q, quintil == 3)
+aq4<-subset(amihud_q, quintil == 4)
+aq5<-subset(amihud_q, quintil == 5)
+
+#saca CTC que arroja error
+#aq1<-aq1[-17,]
+```
+
+```{r}
+#df con solo los nombres del quintil 1 y 5
+#quita la columna que dice el número del quintil
+nq1<-subset(aq1,select=-quintil)
+nq5<-subset(aq5,select=-quintil)
+
+#hace que los nombres de las filas sean parte de la data
+nq1<-tibble::rownames_to_column(nq1,"nombre")
+nq5<-tibble::rownames_to_column(nq5,"nombre")
+```
+
+#Retornos ponderados
+
+```{r}
+retornos3<-retornos2
+
+#rellena con el primer valor no NA en los NA iniciales (para tener valor inicial en lo siguiente que se hará)
+for (i in 2:length(retornos2))
+{
+  primernona<-which(!is.na(retornos2[i]))[1]
+  for (j in 1:primernona)
+  {
+    retornos3[j,i]<-retornos2[primernona,i]
+  }
+}
+
+#retornos log ponderados
+for (i in 2:length(retornos3))
+{
+  cont=1
+  for (j in 1:nrow(retornos3))
+  {
+    if (is.na(retornos3[j,i])==TRUE)
+    {
+      cont=cont+1
+    } 
+    if (is.na(retornos3[j,i])==FALSE)
+    {
+      if (cont>1 && is.na(retornos2[j-1,i])==TRUE)
+      {
+        nona<-retornos3[j,i]
+        for (k in 1:cont)
+        {
+          retornos3[j-k+1,i]<-(nona/cont)
+        }
+        cont=1
+      }
+    }
+  }
+}
+```
+
+```{r}
+na_count2 <-sapply(retornos3, function(y) sum(length(which(is.na(y)))))
+na_count2 <-data.frame(na_count2)
+
+na_count3 <-sapply(retornos3[,nq1$nombre], function(y) sum(length(which(is.na(y)))))
+na_count3 <-data.frame(na_count3)
+```
+
+#Data prep
+
+```{r}
+#duplica el df
+precios2<-precios
+
+#df con los retornos de las acciones del q1 y q5
+rq1<-retornos3[,nq1$nombre]
+rq5<-retornos3[,nq5$nombre]
+
+#duplica el df para tener uno completo antes de cortar
+rq1_completo<-retornos3[,nq1$nombre]
+rq5_completo<-retornos3[,nq5$nombre]
+
+#genera un lag de rq1
+rq1_lagged<-lag(rq1,1)
+```
+
+#Cortes de data (si cambia la base de datos REVISAR)
+
+```{r}
+#data para calcular betas
+
+#1) 1989 a 2021 (inclusive)
+rq1_lagged_0c<-rq1_lagged[-(match("2022-01-03",retornos3$Fecha):nrow(rq1_lagged)),]
+rq5_0c<-rq5[-(match("2022-01-03",retornos3$Fecha):nrow(rq5)),]
+
+#2) 2000 a 2021 (inclusive)
+rq1_lagged_00<-rq1_lagged[(match("2000-01-03",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+rq5_00<-rq5[(match("2000-01-03",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+
+#3) 2010 a 2021 (inclusive)
+rq1_lagged_10<-rq1_lagged[(match("2010-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+rq5_10<-rq5[(match("2010-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+
+#4) 2015 a 2021 (inclusive)
+rq1_lagged_15<-rq1_lagged[(match("2015-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+rq5_15<-rq5[(match("2015-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+
+#5) 2018 a 2021 (inclusive)
+rq1_lagged_18<-rq1_lagged[(match("2018-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+rq5_18<-rq5[(match("2018-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+
+#6) 2019 a 2021 (inclusive)
+rq1_lagged_19<-rq1_lagged[(match("2019-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+rq5_19<-rq5[(match("2019-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+
+#7) 2020 a 2021 (inclusive)
+rq1_lagged_20<-rq1_lagged[(match("2020-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+rq5_20<-rq5[(match("2020-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+
+#8) 2021
+rq1_lagged_21<-rq1_lagged[(match("2021-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+rq5_21<-rq5[(match("2021-01-01",retornos3$Fecha)):(match("2021-12-31",retornos3$Fecha)),]
+
+
+#data para calcular alfas
+#recorte del df completo a 1 año diario (2021)
+rq1_a_21<-rq1_completo[(match("2021-01-01",retornos3$Fecha):match("2021-12-31",retornos3$Fecha)),]
+rq5_a_21<-rq5_completo[(match("2021-01-01",retornos3$Fecha):match("2021-12-31",retornos3$Fecha)),]
+#lag rq1_1
+rq1_a_lagged_21<-lag(rq1_a_21,1)
+
+#recorte del df completo a 1 año diario (2020)
+rq1_a_20<-rq1_completo[(match("2020-01-01",retornos3$Fecha):match("2020-12-31",retornos3$Fecha)),]
+rq5_a_20<-rq5_completo[(match("2020-01-01",retornos3$Fecha):match("2020-12-31",retornos3$Fecha)),]
+#lag rq1_1
+rq1_a_lagged_20<-lag(rq1_a_20,1)
+
+#recorte del df completo a 1 año diario (2019)
+rq1_a_19<-rq1_completo[(match("2019-01-01",retornos3$Fecha):match("2019-12-31",retornos3$Fecha)),]
+rq5_a_19<-rq5_completo[(match("2019-01-01",retornos3$Fecha):match("2019-12-31",retornos3$Fecha)),]
+#lag rq1_1
+rq1_a_lagged_19<-lag(rq1_a_19,1)
+
+#recorte del df completo a 1 año diario (2018)
+rq1_a_18<-rq1_completo[(match("2018-01-01",retornos3$Fecha):match("2018-12-31",retornos3$Fecha)),]
+rq5_a_18<-rq5_completo[(match("2018-01-01",retornos3$Fecha):match("2018-12-31",retornos3$Fecha)),]
+#lag rq1_1
+rq1_a_lagged_18<-lag(rq1_a_18,1)
+
+
+
+
+#data pronóstico
+#prep data retornos (corte a fechas del pronóstico)
+
+#df con los retornos de las acciones del q5 no ponderadas
+r1q5<-retornos[,nq5$nombre]
+
+#duplica el df para tener uno completo antes de cortar
+r1q5_completo<-retornos[,nq5$nombre]
+
+#se corta a las fechas que se están pronosticando
+r1q5<-r1q5[(match("2022-01-03",retornos3$Fecha):nrow(r1q5)),]
+
+#se añade la columna de la fecha 
+r1q5<-cbind(retornos[(match("2022-01-03",retornos3$Fecha):nrow(retornos)),][1],r1q5)
+```
+
+```{r}
+#library("writexl")
+#write_xlsx(rq1_lagged_0c,"rq1_lagged_0c.xlsx")
+#write_xlsx(rq5_0c,"rq5_0c.xlsx")
+#write_xlsx(rq1_lagged_15,"rq1_lagged_15.xlsx")
+#write_xlsx(rq5_15,"rq5_15.xlsx")
+```
+
+```{r}
+match("2020-12-31",retornos3$Fecha)
+```
+
+#Cálculo betas
+
+```{r}
+#función beta
+
+beta_ij<-function(r1_lagged,r5){
+  betaij_2= data.frame(matrix(nrow=length(r1_lagged),ncol=length(r5)))
+  for (i in 1:length(r5)) #iliq
+  {
+    colnames(betaij_2)[i]<-colnames(r5)[i]
+    str1<-colnames(r5)[i]
+    for (j in 1:length(r1_lagged)) #liq
+    {
+      rownames(betaij_2)[j]<-colnames(r1_lagged)[j]
+      str2<-colnames(r1_lagged)[j]
+      mod<-lm(paste(deparse(substitute(r5)),"$",str1,"~",deparse(substitute(r1_lagged)),"$", str2)) #deparse y subs extrae el str del nombre de la var que este sustituyendo la variable local
+      betaij_2[j,i]<-mod$coefficients[2]
+    }
+  }
+  return(betaij_2)
+}
+
+
+#betaij para cada tiempo
+#betaij_0c<-beta_ij(rq1_lagged_0c,rq5_0c)
+#betaij_00<-beta_ij(rq1_lagged_00,rq5_00)
+#betaij_10<-beta_ij(rq1_lagged_10,rq5_10)
+#betaij_15<-beta_ij(rq1_lagged_15,rq5_15)
+betaij_18<-beta_ij(rq1_lagged_18,rq5_18)
+betaij_19<-beta_ij(rq1_lagged_19,rq5_19)
+betaij_20<-beta_ij(rq1_lagged_20,rq5_20)
+betaij_21<-beta_ij(rq1_lagged_21,rq5_21)
+```
+
+```{r}
+#cuenta NA
+colSums(is.na((rq5_21)))
+```
+
+```{r}
+lm(rq5_18$Enjoy~rq1_lagged_18$AGUAS_A)
+```
+
+```{r}
+#revisa función beta_ij
+rq5<-rq5_19
+rq1_lagged<-rq1_lagged_19
+
+betaij= data.frame(matrix(nrow = length(rq1), ncol = length(rq5))) 
+#ilq rq5 col
+#liq rq1 row para abajo
+
+#cambio de nombre de las columnas y filas
+for (i in 1:length(rq5)) #iliq
+{
+  colnames(betaij)[i]<-colnames(rq5)[i]
+  str1<-colnames(rq5)[i]
+  for (j in 1:length(rq1_lagged)) #liq
+  {
+    rownames(betaij)[j]<-colnames(rq1_lagged)[j]
+    str2<-colnames(rq1_lagged)[j]
+    mod<-lm(paste("rq5$",str1,"~ rq1_lagged$", str2))
+    betaij[j,i]<-mod$coefficients[2]
+  }
+}
+```
+
+```{r}
+#ejemplo de plot
+plot(unlist(rq1_lagged_15[4]),unlist(rq5_15[1]),xlab=colnames(rq1_lagged_15)[4],ylab=colnames(rq5_15)[1])
+abline(lm(unlist(rq1_lagged_15[4])~unlist(rq5_15[1])))
+```
+
+#Cálculo matrices b
+
+```{r}
+#crea una lista de df para guardar betaij*Rjt-1
+b_list_18 <- list()
+for (i in 1:length(rq1_a_lagged_18))
+{
+  b_list_18[[i]] <- data.frame(rq1_a_lagged_18)
+}
+
+b_list_19 <- list()
+for (i in 1:length(rq1_a_lagged_19))
+{
+  b_list_19[[i]] <- data.frame(rq1_a_lagged_19)
+}
+
+b_list_20 <- list()
+for (i in 1:length(rq1_a_lagged_20))
+{
+  b_list_20[[i]] <- data.frame(rq1_a_lagged_20)
+}
+
+b_list_21 <- list()
+for (i in 1:length(rq1_a_lagged_21))
+{
+  b_list_21[[i]] <- data.frame(rq1_a_lagged_21)
+}
+```
+
+```{r}
+#se guarda betaij*Rjt-1
+for (j in 1:length(betaij_18))
+{
+  for (i in 1:nrow(betaij_18))
+  {
+    b_list_18[[j]][i]<-betaij_18[i,j]*rq1_a_lagged_18[i]
+  }
+}
+
+for (j in 1:length(betaij_19))
+{
+  for (i in 1:nrow(betaij_19))
+  {
+    b_list_19[[j]][i]<-betaij_19[i,j]*rq1_a_lagged_19[i]
+  }
+}
+
+for (j in 1:length(betaij_20))
+{
+  for (i in 1:nrow(betaij_20))
+  {
+    b_list_20[[j]][i]<-betaij_20[i,j]*rq1_a_lagged_20[i]
+  }
+}
+
+for (j in 1:length(betaij_21))
+{
+  for (i in 1:nrow(betaij_21))
+  {
+    b_list_21[[j]][i]<-betaij_21[i,j]*rq1_a_lagged_21[i]
+  }
+}
+```
+
+#Cálculo aij
+
+```{r}
+#A = x b
+#Rit = aij bij*Rit-1
+
+#iliquida i a<-rq5_1
+
+
+aij_18<-betaij_18 #nuevo df manteniendo la forma de betaij
+for (j in 1:length(betaij_18))
+{
+  a<-unlist(rq5_a_18[j])
+  mod<-lm(a~., data=b_list_18[[j]])
+  for (i in 1:nrow(betaij_18))
+  {
+    aij_18[i,j]<-mod$coefficients[i+1]
+  }
+}
+
+aij_19<-betaij_19 
+for (j in 1:length(betaij_19))
+{
+  a<-unlist(rq5_a_19[j])
+  mod<-lm(a~., data=b_list_19[[j]]) #aca
+  for (i in 1:nrow(betaij_19))
+  {
+    aij_19[i,j]<-mod$coefficients[i+1]
+  }
+}
+
+aij_20<-betaij_20 
+for (j in 1:length(betaij_20))
+{
+  a<-unlist(rq5_a_20[j])
+  mod<-lm(a~., data=b_list_20[[j]]) #aca
+  for (i in 1:nrow(betaij_20))
+  {
+    aij_20[i,j]<-mod$coefficients[i+1]
+  }
+}
+
+aij_21<-betaij_21 
+for (j in 1:length(betaij_21))
+{
+  a<-unlist(rq5_a_21[j])
+  mod<-lm(a~., data=b_list_21[[j]]) #aca
+  for (i in 1:nrow(betaij_21))
+  {
+    aij_21[i,j]<-mod$coefficients[i+1]
+  }
+}
+```
+
+```{r}
+#suma columna para saber si todos son cero
+colSums((rq5_a_20))
+#cuenta NA
+colSums(is.na((rq5_a_20)))
+```
+
+#Revisión aij y bij
+
+```{r}
+#revisa aij
+lm(unlist(rq5_a_20[2]) ~., data=b_list_20[[2]])
+
+aij_20[2]
+```
+
+```{r}
+#revisa que los df b de b_list
+rq1_a_lagged_18[4] #cap
+betaij_18[4,6] #cap x hites
+
+#multiplica los valores que es seguro que son y los compara con lo que dio el for loop
+cbind(rq1_a_lagged_18[4]*betaij_18[4,6],b_list_18[[6]][4]) 
+```
+
+```{r}
+rq1_a_lagged_19[4] #cap
+betaij_19[4,5] #cap x camanchaca
+
+cbind(rq1_a_lagged_19[4]*betaij_19[4,5],b_list_19[[5]][4])
+```
+
+```{r}
+rq1_a_lagged_20[2] #aguas_a
+betaij_20[2,3] #aguas_a x colo
+
+cbind(rq1_a_lagged_20[2]*betaij_20[2,3],b_list_20[[3]][2])
+```
+
+#Predicción
+
+```{r}
+#prep df 1 año para probar los aij (si cambia bd REVISAR)
+
+#1) recorte del df para pronosticar (2021-)
+rq1_2_21<-retornos[,nq1$nombre][(match("2022-01-03",retornos3$Fecha):nrow(rq1_completo)),]
+rq5_2_21<-retornos[,nq5$nombre][(match("2022-01-03",retornos3$Fecha):nrow(rq5_completo)),]
+#se añade la columna de la fecha 
+rq5_2_21<-cbind(retornos[(match("2022-01-03",retornos3$Fecha):nrow(rq5_completo)),][1],rq5_2_21)
+
+#lag rq1_1
+rq1_2_lagged_21<-retornos[,nq1$nombre][(match("2021-12-31",retornos3$Fecha):nrow(rq1_completo)),]
+#se añade la columna de la fecha 
+rq1_2_lagged_21<-cbind(retornos[(match("2021-12-31",retornos3$Fecha):nrow(rq1_completo)),][1],rq1_2_lagged_21)
+
+#2) recorte del df para pronosticar (2020-)
+rq1_2_20<-retornos[,nq1$nombre][(match("2021-01-01",retornos3$Fecha):nrow(rq1_completo)),]
+rq5_2_20<-retornos[,nq5$nombre][(match("2021-01-01",retornos3$Fecha):nrow(rq5_completo)),]
+#se añade la columna de la fecha 
+rq5_2_20<-cbind(retornos[(match("2021-01-01",retornos3$Fecha):nrow(rq5_completo)),][1],rq5_2_20)
+
+#lag rq1_1
+rq1_2_lagged_20<-retornos[,nq1$nombre][(match("2020-12-31",retornos3$Fecha):nrow(rq1_completo)),]
+#se añade la columna de la fecha 
+rq1_2_lagged_20<-cbind(retornos[(match("2020-12-31",retornos3$Fecha):nrow(rq1_completo)),][1],rq1_2_lagged_20)
+
+
+#3) recorte del df para pronosticar (2019-)
+rq1_2_19<-retornos[,nq1$nombre][(match("2020-01-01",retornos3$Fecha):nrow(rq1_completo)),]
+rq5_2_19<-retornos[,nq5$nombre][(match("2020-01-01",retornos3$Fecha):nrow(rq5_completo)),]
+#se añade la columna de la fecha 
+rq5_2_19<-cbind(retornos[(match("2020-01-01",retornos3$Fecha):nrow(rq5_completo)),][1],rq5_2_19)
+
+#lag rq1_1
+rq1_2_lagged_19<-retornos[,nq1$nombre][(match("2019-12-31",retornos3$Fecha):nrow(rq1_completo)),]
+#se añade la columna de la fecha 
+rq1_2_lagged_19<-cbind(retornos[(match("2019-12-31",retornos3$Fecha):nrow(rq1_completo)),][1],rq1_2_lagged_19)
+
+
+
+#4) recorte del df para pronosticar (2018-)
+rq1_2_18<-retornos[,nq1$nombre][(match("2019-01-01",retornos3$Fecha):nrow(rq1_completo)),]
+rq5_2_18<-retornos[,nq5$nombre][(match("2019-01-01",retornos3$Fecha):nrow(rq5_completo)),]
+#se añade la columna de la fecha 
+rq5_2_18<-cbind(retornos[(match("2019-01-01",retornos3$Fecha):nrow(rq5_completo)),][1],rq5_2_18)
+
+#lag rq1_1
+rq1_2_lagged_18<-retornos[,nq1$nombre][(match("2018-12-31",retornos3$Fecha):nrow(rq1_completo)),]
+#se añade la columna de la fecha 
+rq1_2_lagged_18<-cbind(retornos[(match("2018-12-31",retornos3$Fecha):nrow(rq1_completo)),][1],rq1_2_lagged_18)
+```
+
+```{r}
+#----------------------------------------------------------SIN ALFA
+#rellena NA con cero
+#rq1_2_lagged[is.na(rq1_2_lagged)]<-0
+
+#se crea un df para almacenar las predicciones
+#prediccion<-rq5_2
+
+#rellena con NA
+#for (i in 2:length(prediccion))
+#{
+#  for (j in 1:nrow(prediccion))
+#  {
+#    prediccion[j,i]<-NA
+#  }
+#}
+
+
+#se crea un df para almacenar las predicciones
+prediccion_18<-rq5_2_18
+prediccion_19<-rq5_2_19
+prediccion_20<-rq5_2_20
+prediccion_21<-rq5_2_21
+
+#cálculo de las predicciones
+#calcula para abajo (misma acción en otro t) y luego repite para las acciones de al lado
+
+
+for (j in 1:length(aij_18))
+{
+  for (k in 1:nrow(prediccion_18))
+  {
+    suma<-0
+    for (i in 1:nrow(aij_18))
+    {
+      summ<-betaij_18[i,j]*rq1_2_lagged_18[k,j+1]
+      suma<-suma+summ
+    }
+    prediccion_18[k,j+1]<-suma
+  }
+}
+
+for (j in 1:length(aij_19))
+{
+  for (k in 1:nrow(prediccion_19))
+  {
+    suma<-0
+    for (i in 1:nrow(aij_19))
+    {
+      summ<-betaij_19[i,j]*rq1_2_lagged_19[k,j+1]
+      suma<-suma+summ
+    }
+    prediccion_19[k,j+1]<-suma
+  }
+}
+
+
+for (j in 1:length(aij_20))
+{
+  for (k in 1:nrow(prediccion_20))
+  {
+    suma<-0
+    for (i in 1:nrow(aij_20))
+    {
+      summ<-betaij_20[i,j]*rq1_2_lagged_20[k,j+1]
+      suma<-suma+summ
+    }
+    prediccion_20[k,j+1]<-suma
+  }
+}
+
+for (j in 1:length(aij_21))
+{
+  for (k in 1:nrow(prediccion_21))
+  {
+    suma<-0
+    for (i in 1:nrow(aij_21))
+    {
+      summ<-betaij_21[i,j]*rq1_2_lagged_21[k,j+1]
+      suma<-suma+summ
+    }
+    prediccion_21[k,j+1]<-suma
+  }
+}
+```
+
+```{r}
+#rellena NA con cero
+#rq1_2_lagged[is.na(rq1_2_lagged)]<-0
+
+#se crea un df para almacenar las predicciones
+#prediccion<-rq5_2
+
+#rellena con NA
+#for (i in 2:length(prediccion))
+#{
+#  for (j in 1:nrow(prediccion))
+#  {
+#    prediccion[j,i]<-NA
+#  }
+#}
+
+
+#se crea un df para almacenar las predicciones
+prediccion_18<-rq5_2_18
+prediccion_19<-rq5_2_19
+prediccion_20<-rq5_2_20
+prediccion_21<-rq5_2_21
+
+#cálculo de las predicciones
+#calcula para abajo (misma acción en otro t) y luego repite para las acciones de al lado
+
+
+for (j in 1:length(aij_18))
+{
+  for (k in 1:nrow(prediccion_18))
+  {
+    suma<-0
+    for (i in 1:nrow(aij_18))
+    {
+      summ<-aij_18[i,j]*betaij_18[i,j]*rq1_2_lagged_18[k,j+1]
+      suma<-suma+summ
+    }
+    prediccion_18[k,j+1]<-suma
+  }
+}
+
+for (j in 1:length(aij_19))
+{
+  for (k in 1:nrow(prediccion_19))
+  {
+    suma<-0
+    for (i in 1:nrow(aij_19))
+    {
+      summ<-aij_19[i,j]*betaij_19[i,j]*rq1_2_lagged_19[k,j+1]
+      suma<-suma+summ
+    }
+    prediccion_19[k,j+1]<-suma
+  }
+}
+
+
+for (j in 1:length(aij_20))
+{
+  for (k in 1:nrow(prediccion_20))
+  {
+    suma<-0
+    for (i in 1:nrow(aij_20))
+    {
+      summ<-aij_20[i,j]*betaij_20[i,j]*rq1_2_lagged_20[k,j+1]
+      suma<-suma+summ
+    }
+    prediccion_20[k,j+1]<-suma
+  }
+}
+
+for (j in 1:length(aij_21))
+{
+  for (k in 1:nrow(prediccion_21))
+  {
+    suma<-0
+    for (i in 1:nrow(aij_21))
+    {
+      summ<-aij_21[i,j]*betaij_21[i,j]*rq1_2_lagged_21[k,j+1]
+      suma<-suma+summ
+    }
+    prediccion_21[k,j+1]<-suma
+  }
+}
+```
+
+```{r}
+#revisión de la predicción
+suma<-0
+for (i in 1:nrow(aij_18))
+{
+  summ<-aij_18[i,2]*betaij_18[i,2]*rq1_2_lagged_18[5,2+1]
+  suma<-suma+summ
+}
+suma
+
+
+#prediccion[k,j]
+prediccion_18[5,2+1]
+```
+
+#Plot resultados
+
+```{r}
+#plot retornos3 (ponderados) y predicción ponderada
+
+for (i in 2:length(prediccion_18))
+{
+  plot(rq5_2_18$Fecha,unlist(rq5_2_18[i]),type='l',ylab = colnames(rq5_2_18)[i],xlab = 'Fecha')
+  lines(prediccion_18$Fecha,unlist(prediccion_18[i]),type='l',col='red')
+}
+```
+
+```{r}
+#plot retornos3 (ponderados) y predicción ponderada
+
+for (i in 2:length(prediccion_19))
+{
+  plot(rq5_2_19$Fecha,unlist(rq5_2_19[i]),type='l',ylab = colnames(rq5_2_19)[i],xlab = 'Fecha')
+  lines(prediccion_19$Fecha,unlist(prediccion_19[i]),type='l',col='red')
+}
+```
+
+```{r}
+#plot retornos3 (ponderados) y predicción ponderada
+
+for (i in 2:length(prediccion_20))
+{
+  plot(rq5_2_20$Fecha,unlist(rq5_2_20[i]),type='l',ylab = colnames(rq5_2_20)[i],xlab = 'Fecha')
+  lines(prediccion_20$Fecha,unlist(prediccion_20[i]),type='l',col='red')
+}
+```
+
+#Correlación
+
+```{r}
+corr<-matrix(nrow=15,ncol=4)
+for (i in 2:length(rq5_2_20))
+{
+  corr[i-1,1]<-cor(rq5_2_18[i],prediccion_18[i],use='complete.obs')[1]
+  corr[i-1,2]<-cor(rq5_2_19[i],prediccion_19[i],use='complete.obs')[1]
+  corr[i-1,3]<-cor(rq5_2_20[i],prediccion_20[i],use='complete.obs')[1]
+  corr[i-1,4]<-cor(rq5_2_21[i],prediccion_21[i],use='complete.obs')[1]
+}
+
+rownames(corr)<-colnames(precios_q5_18)[-1]
+colnames(corr)<-c("2018","2019","2020","2021")
+```
+
+#Precios
+
+```{r}
+#crea la forma para el df de predicciones con precios
+pred_precios_18<-prediccion_18
+pred_precios_19<-prediccion_19
+pred_precios_20<-prediccion_20
+pred_precios_21<-prediccion_21
+
+
+#corta el df de precios a las columnas del q5, en las fechas relevantes
+precios_q5_18<-cbind(precios$Fecha,precios[,nq5$nombre])[(match("2018-12-31",precios$Fecha):nrow(rq1_completo)),]
+
+precios_q5_19<-cbind(precios$Fecha,precios[,nq5$nombre])[(match("2019-12-31",precios$Fecha):nrow(rq1_completo)),]
+
+precios_q5_20<-cbind(precios$Fecha,precios[,nq5$nombre])[(match("2020-12-31",precios$Fecha):nrow(rq1_completo)),]
+
+precios_q5_21<-cbind(precios$Fecha,precios[,nq5$nombre])[(match("2021-12-31",precios$Fecha):nrow(rq1_completo)),]
+
+
+#cálculo del precio
+#Pt = Pt-1 * exp(retorno t)
+for (j in 2:length(prediccion_18))
+{
+  for (i in 1:nrow(prediccion_18))
+  {
+    pred_precios_18[i,j]<-precios_q5_18[i,j]*exp(prediccion_18[i,j])
+  }
+}
+
+for (j in 2:length(prediccion_19))
+{
+  for (i in 1:nrow(prediccion_19))
+  {
+    pred_precios_19[i,j]<-precios_q5_19[i,j]*exp(prediccion_19[i,j])
+  }
+}
+
+for (j in 2:length(prediccion_20))
+{
+  for (i in 1:nrow(prediccion_20))
+  {
+    pred_precios_20[i,j]<-precios_q5_20[i,j]*exp(prediccion_20[i,j])
+  }
+}
+
+for (j in 2:length(prediccion_21))
+{
+  for (i in 1:nrow(prediccion_21))
+  {
+    pred_precios_21[i,j]<-precios_q5_21[i,j]*exp(prediccion_21[i,j])
+  }
+}
+```
+
+```{r}
+#revision de pred_precios
+inicio<-match(prediccion_18[1,1],precios$Fecha)
+inicio-1+1-1
+precios_q5_18[4,3]
+prediccion_18[4,3]
+precios_q5_18[4,3]*exp(prediccion_18[4,3]) #Pt = Pt-1 * exp(retorno t)
+pred_precios_18[4,3]
+```
+
+#Correlación precios
+
+```{r}
+#quita la primera columna de un df y la ultima del otro para que coincidan en fechas
+c_precios_q5_18<-precios_q5_18[-1,]
+c_precios_q5_19<-precios_q5_19[-1,]
+c_precios_q5_20<-precios_q5_20[-1,]
+c_precios_q5_21<-precios_q5_21[-1,]
+
+c_pred_precios_18<-pred_precios_18[-nrow(pred_precios_18),]
+c_pred_precios_19<-pred_precios_19[-nrow(pred_precios_19),]
+c_pred_precios_20<-pred_precios_20[-nrow(pred_precios_20),]
+c_pred_precios_21<-pred_precios_21[-nrow(pred_precios_21),]
+```
+
+```{r}
+corr_precios<-matrix(nrow=15,ncol=4)
+for (i in 2:length(rq5_2_20))
+{
+  corr_precios[i-1,1]<-cor(c_precios_q5_18[i],c_pred_precios_18[i],use='complete.obs')[1]
+  corr_precios[i-1,2]<-cor(c_precios_q5_19[i],c_pred_precios_19[i],use='complete.obs')[1]
+  corr_precios[i-1,3]<-cor(c_precios_q5_20[i],c_pred_precios_20[i],use='complete.obs')[1]
+  corr_precios[i-1,4]<-cor(c_precios_q5_21[i],c_pred_precios_21[i],use='complete.obs')[1]
+}
+
+rownames(corr_precios)<-colnames(precios_q5_18)[-1]
+colnames(corr_precios)<-c("2018","2019","2020","2021")
+```
+
+```{r}
+#plot retornos3 (ponderados) y predicción ponderada
+
+for (i in 2:length(pred_precios_18))
+{
+  plot(c_precios_q5_18$`precios$Fecha`,unlist(c_precios_q5_18[i]),type='l',ylab = colnames(c_pred_precios_18)[i],xlab = 'Fecha')
+  lines(c_pred_precios_18$Fecha,unlist(c_pred_precios_18[i]),type='l',col='red')
+}
+```
+
+#MSE precios
+
+```{r}
+mse_precios<-matrix(nrow=15,ncol=4)
+
+for (i in 2:length(rq5_2_20))
+{
+  #2018
+  data<-data.frame(pred=c_pred_precios_18[i],actual=c_precios_q5_18[i])
+  colnames(data)<-c("pred","actual")
+  mse_precios[i-1,1]<-MSE(data$pred,data$actual,na.rm=TRUE)
+  #2019
+  data<-data.frame(pred=c_pred_precios_19[i],actual=c_precios_q5_19[i])
+  colnames(data)<-c("pred","actual")
+  mse_precios[i-1,2]<-MSE(data$pred,data$actual,na.rm=TRUE)
+  #2020
+    data<-data.frame(pred=c_pred_precios_20[i],actual=c_precios_q5_20[i])
+    colnames(data)<-c("pred","actual")
+    mse_precios[i-1,3]<-MSE(data$pred,data$actual,na.rm=TRUE)
+    #2021
+    data<-data.frame(pred=c_pred_precios_21[i],actual=c_precios_q5_21[i])
+    colnames(data)<-c("pred","actual")
+    mse_precios[i-1,4]<-MSE(data$pred,data$actual,na.rm=TRUE)
+}
+
+rownames(mse_precios)<-colnames(precios_q5_18)[-1]
+colnames(mse_precios)<-c("2018","2019","2020","2021")
+```
+
+```{r}
+colSums(mse_precios)
+```
+
+```{r}
+#revisa los MSE
+data<-data.frame(pred=c_pred_precios_19$BANVIDA,actual=c_precios_q5_19$BANVIDA)
+
+#mse(sim,obs,na.rm=TRUE) = mse(pred,actual,na.rm=TRUE) 
+#na.rm=TRUE si falta pred o actual los remueve antes de calcular
+MSE(data$pred,data$actual,na.rm=TRUE)
+```
+
+```{r}
+write.csv(mse_precios, "mse_chile.csv")
+#,row.names = F)
+write.csv(corr, "corr_chile.csv")
+write.csv(corr_precios, "corr_precios_chile.csv")
+```
+
+```{r}
+write.csv(amihud_q, "acciones_chile.csv")
+```
+
+#Pred2
+
+```{r}
+pred2_precios_18<-precios_q5_18
+pred2_precios_19<-precios_q5_19
+pred2_precios_20<-precios_q5_20
+pred2_precios_21<-precios_q5_21
+
+#rellena el primer valor no NA de los precios en un df vacio
+for (j in 2:length(pred2_precios_18))
+{
+  k<-0
+  for (i in 2:nrow(pred2_precios_18))
+  {
+    pred2_precios_18[i,j]<-NA
+    if (k==0 & is.na(precios_q5_18[i,j])==FALSE)
+    {
+      k<-1
+      pred2_precios_18[i,j]<-precios_q5_18[i,j]
+    }
+  }
+}
+
+for (j in 2:length(pred2_precios_19))
+{
+  k<-0
+  for (i in 2:nrow(pred2_precios_19))
+  {
+    pred2_precios_19[i,j]<-NA
+    if (k==0 & is.na(precios_q5_19[i,j])==FALSE)
+    {
+      k<-1
+      pred2_precios_19[i,j]<-precios_q5_19[i,j]
+    }
+  }
+}
+
+for (j in 2:length(pred2_precios_20))
+{
+  k<-0
+  for (i in 2:nrow(pred2_precios_20))
+  {
+    pred2_precios_20[i,j]<-NA
+    if (k==0 & is.na(precios_q5_20[i,j])==FALSE)
+    {
+      k<-1
+      pred2_precios_20[i,j]<-precios_q5_20[i,j]
+    }
+  }
+}
+
+for (j in 2:length(pred2_precios_21))
+{
+  k<-0
+  for (i in 2:nrow(pred2_precios_21))
+  {
+    pred2_precios_21[i,j]<-NA
+    if (k==0 & is.na(precios_q5_21[i,j])==FALSE)
+    {
+      k<-1
+      pred2_precios_21[i,j]<-precios_q5_21[i,j]
+    }
+  }
+}
+```
+
+```{r}
+#2
+#cálculo del precio
+#Pt = Pt-1 * exp(retorno t)
+for (j in 2:length(prediccion_18))
+{
+  k<-0
+  for (i in 2:nrow(prediccion_18))
+  {
+    if (is.na(pred2_precios_18[i-1,j])==FALSE & k==0)
+    {
+      pred2_precios_18[i,j]<-pred2_precios_18[i-1,j]*exp(prediccion_18[i,j])
+      k<-1
+    }
+    if (k==1)
+    {
+      pred2_precios_18[i,j]<-pred2_precios_18[i-1,j]*exp(prediccion_18[i,j])
+      if (is.na(pred2_precios_18[i,j]==TRUE))
+      {
+        pred2_precios_18[i,j]<-pred2_precios_18[i-1,j]
+      }
+    }
+  }
+}
+
+for (j in 2:length(prediccion_19))
+{
+  k<-0
+  for (i in 2:nrow(prediccion_19))
+  {
+    if (is.na(pred2_precios_19[i-1,j])==FALSE & k==0)
+    {
+      pred2_precios_19[i,j]<-pred2_precios_19[i-1,j]*exp(prediccion_19[i,j])
+      k<-1
+    }
+    if (k==1)
+    {
+      pred2_precios_19[i,j]<-pred2_precios_19[i-1,j]*exp(prediccion_19[i,j])
+      if (is.na(pred2_precios_19[i,j]==TRUE))
+      {
+        pred2_precios_19[i,j]<-pred2_precios_19[i-1,j]
+      }
+    }
+  }
+}
+
+for (j in 2:length(prediccion_20))
+{
+  k<-0
+  for (i in 2:nrow(prediccion_20))
+  {
+    if (is.na(pred2_precios_20[i-1,j])==FALSE & k==0)
+    {
+      pred2_precios_20[i,j]<-pred2_precios_20[i-1,j]*exp(prediccion_20[i,j])
+      k<-1
+    }
+    if (k==1)
+    {
+      pred2_precios_20[i,j]<-pred2_precios_20[i-1,j]*exp(prediccion_20[i,j])
+      if (is.na(pred2_precios_20[i,j]==TRUE))
+      {
+        pred2_precios_20[i,j]<-pred2_precios_20[i-1,j]
+      }
+    }
+  }
+}
+
+for (j in 2:length(prediccion_21))
+{
+  k<-0
+  for (i in 2:nrow(prediccion_21))
+  {
+    if (is.na(pred2_precios_21[i-1,j])==FALSE & k==0)
+    {
+      pred2_precios_21[i,j]<-pred2_precios_21[i-1,j]*exp(prediccion_21[i,j])
+      k<-1
+    }
+    if (k==1)
+    {
+      pred2_precios_21[i,j]<-pred2_precios_21[i-1,j]*exp(prediccion_21[i,j])
+      if (is.na(pred2_precios_21[i,j]==TRUE))
+      {
+        pred2_precios_21[i,j]<-pred2_precios_21[i-1,j]
+      }
+    }
+  }
+}
+```
+
+```{r}
+for (i in 2:length(pred2_precios_18))
+{
+  plot(precios_q5_18$`precios$Fecha`[1:360],unlist(precios_q5_18[i])[1:360],type='l',ylab = colnames(pred2_precios_18)[i],xlab = 'Fecha')
+  lines(pred2_precios_18$`precios$Fecha`[1:360],unlist(pred2_precios_18[i])[1:360],type='l',col='red')
+}
+```
+
+```{r}
+for (i in 2:length(pred2_precios_19))
+{
+  plot(precios_q5_19$`precios$Fecha`[1:360],unlist(precios_q5_19[i])[1:360],type='l',ylab = colnames(pred2_precios_19)[i],xlab = 'Fecha')
+  lines(pred2_precios_19$`precios$Fecha`[1:360],unlist(pred2_precios_19[i])[1:360],type='l',col='red')
+}
+```
+
+```{r}
+for (i in 2:length(pred2_precios_20))
+{
+  plot(precios_q5_20$`precios$Fecha`[1:360],unlist(precios_q5_20[i])[1:360],type='l',ylab = colnames(pred2_precios_20)[i],xlab = 'Fecha')
+  lines(pred2_precios_20$`precios$Fecha`[1:360],unlist(pred2_precios_20[i])[1:360],type='l',col='red')
+}
+```
+
+```{r}
+for (i in 2:length(pred2_precios_21))
+{
+  plot(precios_q5_21$`precios$Fecha`[1:360],unlist(precios_q5_21[i])[1:360],type='l',ylab = colnames(pred2_precios_21)[i],xlab = 'Fecha')
+  lines(pred2_precios_21$`precios$Fecha`[1:360],unlist(pred2_precios_21[i])[1:360],type='l',col='red')
+}
+
+```
+
+```{r}
+corr_precios2<-matrix(nrow=15,ncol=4)
+for (i in 2:length(rq5_2_20))
+{
+  corr_precios2[i-1,1]<-cor(precios_q5_18[i],pred2_precios_18[i],use='complete.obs')[1]
+  corr_precios2[i-1,2]<-cor(precios_q5_19[i],pred2_precios_19[i],use='complete.obs')[1]
+  corr_precios2[i-1,3]<-cor(precios_q5_20[i],pred2_precios_20[i],use='complete.obs')[1]
+  corr_precios2[i-1,4]<-cor(precios_q5_21[i],pred2_precios_21[i],use='complete.obs')[1]
+}
+
+rownames(corr_precios2)<-colnames(precios_q5_18)[-1]
+colnames(corr_precios2)<-c("2018","2019","2020","2021")
+```
+
+```{r}
+mse_precios2<-matrix(nrow=15,ncol=4)
+
+for (i in 2:length(rq5_2_20))
+{
+  #2018
+  data<-data.frame(pred=pred2_precios_18[i],actual=precios_q5_18[i])
+  colnames(data)<-c("pred","actual")
+  mse_precios2[i-1,1]<-MSE(data$pred,data$actual,na.rm=TRUE)
+  #2019
+  data<-data.frame(pred=pred2_precios_19[i],actual=precios_q5_19[i])
+  colnames(data)<-c("pred","actual")
+  mse_precios2[i-1,2]<-MSE(data$pred,data$actual,na.rm=TRUE)
+  #2020
+    data<-data.frame(pred=pred2_precios_20[i],actual=precios_q5_20[i])
+    colnames(data)<-c("pred","actual")
+    mse_precios2[i-1,3]<-MSE(data$pred,data$actual,na.rm=TRUE)
+    #2021
+    data<-data.frame(pred=pred2_precios_21[i],actual=precios_q5_21[i])
+    colnames(data)<-c("pred","actual")
+    mse_precios2[i-1,4]<-MSE(data$pred,data$actual,na.rm=TRUE)
+}
+
+rownames(mse_precios2)<-colnames(precios_q5_18)[-1]
+colnames(mse_precios2)<-c("2018","2019","2020","2021")
+```
+
+```{r}
+colSums(mse_precios2)
+```
+
+#Ordena predicción
+
+```{r}
+#corta los retornos al q5 entre 2022-2023
+retornos_q5<-retornos[,nq5$nombre][(match("2022-01-03",retornos$Fecha):(match("2023-12-29",retornos$Fecha))),]
+#transforma ceros en NA
+retornos_q5[retornos_q5==0]<-NA
+
+#agrega columna fecha en retornos_q5
+fecha<-prediccion_18[(match("2022-01-03",prediccion_18$Fecha):(match("2023-12-29",prediccion_18$Fecha))),1]
+retornos_q5<-cbind(fecha,retornos_q5)
+```
+
+```{r}
+#corta la predicción a 2022-2023
+prediccion_18_22_23<-prediccion_18[(match("2022-01-03",prediccion_18$Fecha):(match("2023-12-29",prediccion_18$Fecha))),]
+prediccion_19_22_23<-prediccion_19[(match("2022-01-03",prediccion_19$Fecha):(match("2023-12-29",prediccion_19$Fecha))),]
+prediccion_20_22_23<-prediccion_20[(match("2022-01-03",prediccion_20$Fecha):(match("2023-12-29",prediccion_20$Fecha))),]
+prediccion_21_22_23<-prediccion_21[(match("2022-01-03",prediccion_21$Fecha):(match("2023-12-29",prediccion_21$Fecha))),]
+
+#precios originales cortados a 2022-2023
+precios_q5_22_23<-precios_q5_18[(match("2022-01-03",precios_q5_18$`precios$Fecha`):(match("2023-12-29",precios_q5_18$`precios$Fecha`))),]
+
+#transforma ceros en NA porque significa que no hubo transacción
+prediccion_18_22_23[prediccion_18_22_23==0]<-NA
+prediccion_19_22_23[prediccion_19_22_23==0]<-NA
+prediccion_20_22_23[prediccion_20_22_23==0]<-NA
+prediccion_21_22_23[prediccion_21_22_23==0]<-NA
+```
+
+#Retornos no ponderados
+
+```{r}
+#df vacios para la prediccion no ponderada final
+prediccion_18_22_23_final<-prediccion_18_22_23
+prediccion_19_22_23_final<-prediccion_19_22_23
+prediccion_20_22_23_final<-prediccion_20_22_23
+prediccion_21_22_23_final<-prediccion_21_22_23
+
+for (j in 2:length(prediccion_18_22_23_final))
+{
+  for (i in 1:nrow(prediccion_18_22_23))
+  {
+    prediccion_18_22_23_final[i,j]<-NA
+    prediccion_19_22_23_final[i,j]<-NA
+    prediccion_20_22_23_final[i,j]<-NA
+    prediccion_21_22_23_final[i,j]<-NA
+  }
+}
+
+
+for (j in 2:length(prediccion_18_22_23))
+{
+  suma<-0
+  for (i in 2:nrow(prediccion_18_22_23))
+  {
+    #si tiene dato
+    if (is.na(retornos_q5[i,j])==FALSE)
+    {
+      nona<-prediccion_18_22_23[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        prediccion_18_22_23_final[i,j]<-suma+nona
+      }
+      else
+      {
+        prediccion_18_22_23_final[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(prediccion_18_22_23[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(retornos_q5[i,j])==TRUE)
+      {
+        summ<-prediccion_18_22_23[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+
+for (j in 2:length(prediccion_19_22_23))
+{
+  suma<-0
+  for (i in 2:nrow(prediccion_19_22_23))
+  {
+    #si tiene dato
+    if (is.na(retornos_q5[i,j])==FALSE)
+    {
+      nona<-prediccion_19_22_23[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        prediccion_19_22_23_final[i,j]<-suma+nona
+      }
+      else
+      {
+        prediccion_19_22_23_final[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(prediccion_19_22_23[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(retornos_q5[i,j])==TRUE)
+      {
+        summ<-prediccion_19_22_23[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+
+for (j in 2:length(prediccion_20_22_23))
+{
+  suma<-0
+  for (i in 2:nrow(prediccion_20_22_23))
+  {
+    #si tiene dato
+    if (is.na(retornos_q5[i,j])==FALSE)
+    {
+      nona<-prediccion_20_22_23[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        prediccion_20_22_23_final[i,j]<-suma+nona
+      }
+      else
+      {
+        prediccion_20_22_23_final[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(prediccion_20_22_23[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(retornos_q5[i,j])==TRUE)
+      {
+        summ<-prediccion_20_22_23[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+
+for (j in 2:length(prediccion_21_22_23))
+{
+  suma<-0
+  for (i in 2:nrow(prediccion_21_22_23))
+  {
+    #si tiene dato
+    if (is.na(retornos_q5[i,j])==FALSE)
+    {
+      nona<-prediccion_21_22_23[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        prediccion_21_22_23_final[i,j]<-suma+nona
+      }
+      else
+      {
+        prediccion_21_22_23_final[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(prediccion_21_22_23[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(retornos_q5[i,j])==TRUE)
+      {
+        summ<-prediccion_21_22_23[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+```
+
+#Correlaciones no ponderadas
+
+```{r}
+corr_rnpond<-matrix(nrow=15,ncol=4)
+for (i in 2:length(retornos_q5))
+{
+  corr_rnpond[i-1,1]<-cor(retornos_q5[i],prediccion_18_22_23_final[i],use='complete.obs')[1]
+  corr_rnpond[i-1,2]<-cor(retornos_q5[i],prediccion_19_22_23_final[i],use='complete.obs')[1]
+  corr_rnpond[i-1,3]<-cor(retornos_q5[i],prediccion_20_22_23_final[i],use='complete.obs')[1]
+  corr_rnpond[i-1,4]<-cor(retornos_q5[i],prediccion_21_22_23_final[i],use='complete.obs')[1]
+}
+
+rownames(corr_rnpond)<-colnames(precios_q5_18)[-1]
+colnames(corr_rnpond)<-c("2018","2019","2020","2021")
+```
+
+#MSE no ponderado
+
+```{r}
+mse_rnpond<-matrix(nrow=15,ncol=4)
+
+for (i in 2:length(rq5_2_20))
+{
+  #2018
+  data<-data.frame(pred=prediccion_18_22_23_final[i],actual=retornos_q5[i])
+  colnames(data)<-c("pred","actual")
+  mse_rnpond[i-1,1]<-MSE(data$pred,data$actual,na.rm=TRUE)
+  #2019
+  data<-data.frame(pred=prediccion_19_22_23_final[i],actual=retornos_q5[i])
+  colnames(data)<-c("pred","actual")
+  mse_rnpond[i-1,2]<-MSE(data$pred,data$actual,na.rm=TRUE)
+  #2020
+    data<-data.frame(pred=prediccion_20_22_23_final[i],actual=retornos_q5[i])
+    colnames(data)<-c("pred","actual")
+    mse_rnpond[i-1,3]<-MSE(data$pred,data$actual,na.rm=TRUE)
+    #2021
+    data<-data.frame(pred=prediccion_21_22_23_final[i],actual=retornos_q5[i])
+    colnames(data)<-c("pred","actual")
+    mse_rnpond[i-1,4]<-MSE(data$pred,data$actual,na.rm=TRUE)
+}
+
+rownames(mse_rnpond)<-colnames(precios_q5_18)[-1]
+colnames(mse_rnpond)<-c("2018","2019","2020","2021")
+```
+
+#Plot no ponderado
+
+```{r}
+#plot retornos no ponderados y predicción no ponderada
+
+for (i in 2:length(prediccion_18_22_23_final))
+{
+  plot(retornos_q5$fecha,unlist(retornos_q5[i]),type='l',ylab = colnames(retornos_q5)[i],xlab = 'Fecha')
+  lines(prediccion_18_22_23_final$Fecha,unlist(prediccion_18_22_23_final[i]),type='l',col='red')
+}
+```
+
+```{r}
+#plot retornos no ponderados y predicción no ponderada
+
+for (i in 2:length(prediccion_19_22_23_final))
+{
+  plot(retornos_q5$fecha,unlist(retornos_q5[i]),type='l',ylab = colnames(retornos_q5)[i],xlab = 'Fecha')
+  lines(prediccion_19_22_23_final$Fecha,unlist(prediccion_19_22_23_final[i]),type='l',col='red')
+}
+```
+
+```{r}
+#plot retornos no ponderados y predicción no ponderada
+
+for (i in 2:length(prediccion_20_22_23_final))
+{
+  plot(retornos_q5$fecha,unlist(retornos_q5[i]),type='l',ylab = colnames(retornos_q5)[i],xlab = 'Fecha')
+  lines(prediccion_20_22_23_final$Fecha,unlist(prediccion_20_22_23_final[i]),type='l',col='red')
+}
+```
+
+```{r}
+#plot retornos no ponderados y predicción no ponderada
+
+for (i in 2:length(prediccion_21_22_23_final))
+{
+  plot(retornos_q5$fecha,unlist(retornos_q5[i]),type='l',ylab = colnames(retornos_q5)[i],xlab = 'Fecha')
+  lines(prediccion_21_22_23_final$Fecha,unlist(prediccion_21_22_23_final[i]),type='l',col='red')
+}
+```
+
+#Corr_rnpond_2
+
+```{r}
+corr_rnpond_2<-matrix(nrow=(length(retornos_q5)-1),ncol=4)
+for (i in 2:length(retornos_q5))
+{
+  corr_rnpond_2[i-1,1]<-cor(retornos_q5[i],prediccion_18_22_23_final_2[i],use='complete.obs')[1]
+  corr_rnpond_2[i-1,2]<-cor(retornos_q5[i],prediccion_19_22_23_final_2[i],use='complete.obs')[1]
+  corr_rnpond_2[i-1,3]<-cor(retornos_q5[i],prediccion_20_22_23_final_2[i],use='complete.obs')[1]
+  corr_rnpond_2[i-1,4]<-cor(retornos_q5[i],prediccion_21_22_23_final_2[i],use='complete.obs')[1]
+}
+
+rownames(corr_rnpond_2)<-colnames(precios_q5_18)[-1]
+colnames(corr_rnpond_2)<-c("2018 - 2021","2019 - 2021","2020 - 2021","2021")
+```
+
+#Precios no ponderados
+
+```{r}
+#borra precios repetidos
+
+precios_q5_22_23<-precios_q5_18[(match("2021-12-31",precios_q5_18$`precios$Fecha`):(nrow(precios_q5_18))),]
+                                
+precios_q5_22_23_sr<-precios_q5_22_23
+
+
+
+for (j in 2:length(precios_q5_22_23))
+{
+  for (i in 1:(nrow(precios_q5_22_23)-31))
+  {
+    if (is.na(precios_q5_22_23[i,j])==FALSE)
+    {
+      ultimo<-precios_q5_22_23[i,j]
+      for (k in 1:30)
+      {
+        if (is.na(precios_q5_22_23[k+i,j])==FALSE)
+        {
+          if (ultimo==precios_q5_22_23[k+i,j])
+          {
+            precios_q5_22_23_sr[k+i,j]<-NA
+          }
+        }
+      }
+    }
+  }
+}
+
+precios_q5_22_23<-precios_q5_22_23[(match("2022-01-03",precios_q5_22_23$`precios$Fecha`):(match("2023-12-29",precios_q5_22_23$`precios$Fecha`))),]
+
+precios_q5_22_23_sr<-precios_q5_22_23_sr[(match("2022-01-03",precios_q5_22_23_sr$`precios$Fecha`):(match("2023-12-29",precios_q5_22_23_sr$`precios$Fecha`))),]
+```
+
+```{r}
+#df vacios para la prediccion no ponderada que hace match con los precios
+prediccion_18_22_23_final_2<-prediccion_18_22_23
+prediccion_19_22_23_final_2<-prediccion_19_22_23
+prediccion_20_22_23_final_2<-prediccion_20_22_23
+prediccion_21_22_23_final_2<-prediccion_21_22_23
+
+for (j in 2:length(prediccion_18_22_23_final_2))
+{
+  for (i in 1:nrow(prediccion_18_22_23_final_2))
+  {
+    prediccion_18_22_23_final_2[i,j]<-NA
+    prediccion_19_22_23_final_2[i,j]<-NA
+    prediccion_20_22_23_final_2[i,j]<-NA
+    prediccion_21_22_23_final_2[i,j]<-NA
+  }
+}
+
+
+for (j in 2:length(prediccion_18_22_23))
+{
+  suma<-0
+  for (i in 2:nrow(prediccion_18_22_23))
+  {
+    #si tiene dato
+    if (is.na(precios_q5_22_23_sr[i,j])==FALSE)
+    {
+      nona<-prediccion_18_22_23[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        prediccion_18_22_23_final_2[i,j]<-suma+nona
+      }
+      else
+      {
+        prediccion_18_22_23_final_2[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(prediccion_18_22_23[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(precios_q5_22_23_sr[i,j])==TRUE)
+      {
+        summ<-prediccion_18_22_23[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+
+for (j in 2:length(prediccion_19_22_23))
+{
+  suma<-0
+  for (i in 2:nrow(prediccion_19_22_23))
+  {
+    #si tiene dato
+    if (is.na(precios_q5_22_23_sr[i,j])==FALSE)
+    {
+      nona<-prediccion_19_22_23[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        prediccion_19_22_23_final_2[i,j]<-suma+nona
+      }
+      else
+      {
+        prediccion_19_22_23_final_2[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(prediccion_19_22_23[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(precios_q5_22_23_sr[i,j])==TRUE)
+      {
+        summ<-prediccion_19_22_23[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+
+for (j in 2:length(prediccion_20_22_23))
+{
+  suma<-0
+  for (i in 2:nrow(prediccion_20_22_23))
+  {
+    #si tiene dato
+    if (is.na(precios_q5_22_23_sr[i,j])==FALSE)
+    {
+      nona<-prediccion_20_22_23[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        prediccion_20_22_23_final_2[i,j]<-suma+nona
+      }
+      else
+      {
+        prediccion_20_22_23_final_2[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(prediccion_20_22_23[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(precios_q5_22_23_sr[i,j])==TRUE)
+      {
+        summ<-prediccion_20_22_23[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+
+for (j in 2:length(prediccion_21_22_23))
+{
+  suma<-0
+  for (i in 2:nrow(prediccion_21_22_23))
+  {
+    #si tiene dato
+    if (is.na(precios_q5_22_23_sr[i,j])==FALSE)
+    {
+      nona<-prediccion_21_22_23[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        prediccion_21_22_23_final_2[i,j]<-suma+nona
+      }
+      else
+      {
+        prediccion_21_22_23_final_2[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(prediccion_21_22_23[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(precios_q5_22_23_sr[i,j])==TRUE)
+      {
+        summ<-prediccion_21_22_23[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+```
+
+```{r}
+#df vacios para la prediccion no ponderada final
+pred_precios_18_22_23_final<-prediccion_18_22_23
+pred_precios_19_22_23_final<-prediccion_19_22_23
+pred_precios_20_22_23_final<-prediccion_20_22_23
+pred_precios_21_22_23_final<-prediccion_21_22_23
+
+for (j in 2:length(prediccion_18_22_23_final))
+{
+  for (i in 1:nrow(prediccion_18_22_23))
+  {
+    pred_precios_18_22_23_final[i,j]<-NA
+    pred_precios_19_22_23_final[i,j]<-NA
+    pred_precios_20_22_23_final[i,j]<-NA
+    pred_precios_21_22_23_final[i,j]<-NA
+  }
+}
+
+#df precios originales: precios_q5_22_23
+
+#cálculo del precio
+#Pt = Pt-1 * exp(retorno t)
+for (j in 2:length(precios_q5_22_23_sr))
+{
+  nonna<-c()
+  for (i in 1:nrow(precios_q5_22_23_sr))
+  {
+    #si tiene dato
+    if (is.na(precios_q5_22_23_sr[i,j])==FALSE)
+    {
+      nonna<-append(nonna,i)
+    }
+  }
+  pred_precios_18_22_23_final[nonna[1],j]<-precios_q5_22_23_sr[nonna[1],j]
+  pred_precios_19_22_23_final[nonna[1],j]<-precios_q5_22_23_sr[nonna[1],j]
+  pred_precios_20_22_23_final[nonna[1],j]<-precios_q5_22_23_sr[nonna[1],j]
+  pred_precios_21_22_23_final[nonna[1],j]<-precios_q5_22_23_sr[nonna[1],j]
+  for (k in 2:length(nonna))
+  {
+    pred_precios_18_22_23_final[nonna[k],j]<-precios_q5_22_23_sr[nonna[k-1],j]*exp(prediccion_18_22_23_final_2[nonna[k],j])
+    pred_precios_19_22_23_final[nonna[k],j]<-precios_q5_22_23_sr[nonna[k-1],j]*exp(prediccion_19_22_23_final_2[nonna[k],j])
+    pred_precios_20_22_23_final[nonna[k],j]<-precios_q5_22_23_sr[nonna[k-1],j]*exp(prediccion_20_22_23_final_2[nonna[k],j])
+    pred_precios_21_22_23_final[nonna[k],j]<-precios_q5_22_23_sr[nonna[k-1],j]*exp(prediccion_21_22_23_final_2[nonna[k],j])
+  }
+}
+```
+
+#Writexl
+
+```{r}
+library("writexl")
+write_xlsx(prediccion_18_22_23,"prediccion_18_22_23.xlsx")
+write_xlsx(retornos_q5,"retornos_q5.xlsx")
+write_xlsx(precios_q5_22_23_sr,"precios_q5_22_23_sr.xlsx")
+```
+
+```{r}
+library("writexl")
+write_xlsx(prediccion_19_22_23,"prediccion_19_22_23.xlsx")
+write_xlsx(prediccion_20_22_23,"prediccion_20_22_23.xlsx")
+write_xlsx(prediccion_21_22_23,"prediccion_21_22_23.xlsx")
+```
+
+```{r}
+write_xlsx(prediccion_18_22_23_final_2,"prediccion_18_22_23_final_2.xlsx")
+```
+
+```{r}
+mse_precios_npond_2<-tibble::rownames_to_column(as.data.frame(mse_precios_npond),"a")
+mape_precios_npond_2<-tibble::rownames_to_column(as.data.frame(mape_precios_npond),"a")
+```
+
+```{r}
+library("writexl")
+write_xlsx(mse_precios_npond_2,"mse_precios_npond.xlsx")
+write_xlsx(mape_precios_npond_2,"mape_precios_npond.xlsx")
+```
+
+```{r}
+corr_rnpond_2<-tibble::rownames_to_column(as.data.frame(corr_rnpond_2),"a")
+corr_precios_npond<-tibble::rownames_to_column(as.data.frame(corr_precios_npond),"a")
+```
+
+```{r}
+library("writexl")
+write_xlsx(corr_rnpond_2,"corr_rnpond_2.xlsx")
+write_xlsx(corr_precios_npond,"corr_precios_npond.xlsx")
+```
+
+#Plot precio no ponderado
+
+```{r}
+for (i in 2:length(pred_precios_18_22_23_final))
+{
+  plot(precios_q5_22_23_sr$`precios$Fecha`,unlist(precios_q5_22_23_sr[i]),type='l',ylab = colnames(pred_precios_18_22_23_final)[i],xlab = 'Fecha')
+  lines(pred_precios_18_22_23_final$Fecha,unlist(pred_precios_18_22_23_final[i]),type='l',col='red')
+}
+```
+
+#Correlaciones precios no ponderadas
+
+```{r}
+corr_precios_npond<-matrix(nrow=15,ncol=4)
+for (i in 2:length(precios_q5_22_23_sr))
+{
+  corr_precios_npond[i-1,1]<-cor(precios_q5_22_23_sr[i],pred_precios_18_22_23_final[i],use='complete.obs')[1]
+  corr_precios_npond[i-1,2]<-cor(precios_q5_22_23_sr[i],pred_precios_19_22_23_final[i],use='complete.obs')[1]
+  corr_precios_npond[i-1,3]<-cor(precios_q5_22_23_sr[i],pred_precios_20_22_23_final[i],use='complete.obs')[1]
+  corr_precios_npond[i-1,4]<-cor(precios_q5_22_23_sr[i],pred_precios_21_22_23_final[i],use='complete.obs')[1]
+}
+
+rownames(corr_precios_npond)<-colnames(precios_q5_18)[-1]
+colnames(corr_precios_npond)<-c("2018 - 2021","2019 - 2021","2020 - 2021","2021")
+```
+
+#MSE precios no ponderadas
+
+```{r}
+mse_precios_npond<-matrix(nrow=15,ncol=4)
+
+for (i in 2:length(precios_q5_22_23_sr))
+{
+  #2018
+  data<-data.frame(pred=pred_precios_18_22_23_final[i],actual=precios_q5_22_23_sr[i])
+  colnames(data)<-c("pred","actual")
+  mse_precios_npond[i-1,1]<-MSE(data$pred,data$actual,na.rm=TRUE)
+  #2019
+  data<-data.frame(pred=pred_precios_19_22_23_final[i],actual=precios_q5_22_23_sr[i])
+  colnames(data)<-c("pred","actual")
+  mse_precios_npond[i-1,2]<-MSE(data$pred,data$actual,na.rm=TRUE)
+  #2020
+    data<-data.frame(pred=pred_precios_20_22_23_final[i],actual=precios_q5_22_23_sr[i])
+    colnames(data)<-c("pred","actual")
+    mse_precios_npond[i-1,3]<-MSE(data$pred,data$actual,na.rm=TRUE)
+    #2021
+    data<-data.frame(pred=pred_precios_21_22_23_final[i],actual=precios_q5_22_23_sr[i])
+    colnames(data)<-c("pred","actual")
+    mse_precios_npond[i-1,4]<-MSE(data$pred,data$actual,na.rm=TRUE)
+}
+
+rownames(mse_precios_npond)<-colnames(precios_q5_18)[-1]
+colnames(mse_precios_npond)<-c("2018","2019","2020","2021")
+```
+
+```{r}
+library("MLmetrics")
+mape(unlist(precios_q5_22_23_sr[2]),unlist(pred_precios_18_22_23_final[2]))
+```
+
+```{r}
+library("MLmetrics")
+mape(na.omit(pred_precios_18_22_23_final$BANVIDA),na.omit(precios_q5_22_23_sr$BANVIDA))
+```
+
+```{r}
+mape_precios_npond<-matrix(nrow=15,ncol=4)
+
+for (i in 2:length(precios_q5_22_23_sr))
+{
+  #2018
+  data<-data.frame(pred=na.omit(pred_precios_18_22_23_final[i]),actual=na.omit(precios_q5_22_23_sr[i]))
+  colnames(data)<-c("pred","actual")
+  mape_precios_npond[i-1,1]<-mape(data$actual,data$pred)
+  #2019
+  data<-data.frame(pred=na.omit(pred_precios_19_22_23_final[i]),actual=na.omit(precios_q5_22_23_sr[i]))
+  colnames(data)<-c("pred","actual")
+  mape_precios_npond[i-1,2]<-mape(data$actual,data$pred)
+  #2020
+  data<-data.frame(pred=na.omit(pred_precios_20_22_23_final[i]),actual=na.omit(precios_q5_22_23_sr[i]))
+  colnames(data)<-c("pred","actual")
+  mape_precios_npond[i-1,3]<-mape(data$actual,data$pred)
+  #2021
+  data<-data.frame(pred=na.omit(pred_precios_21_22_23_final[i]),actual=na.omit(precios_q5_22_23_sr[i]))
+  colnames(data)<-c("pred","actual")
+  mape_precios_npond[i-1,4]<-mape(data$actual,data$pred)
+}
+
+rownames(mape_precios_npond)<-colnames(precios_q5_18)[-1]
+colnames(mape_precios_npond)<-c("2018","2019","2020","2021")
+```
+
+```{r}
+#fecha inicio - fecha término - mse 2018,2019,2020,2021 - mape 
+#a<-c()
+#b<-c()
+
+#instancias<-data.frame(a,b)
+
+#for (j in 2:sum(!is.na(precios_q5_22_23_sr[2])))
+#{
+#  for (i in 1:nrow(precios_q5_22_23_sr))
+#  {
+    
+#  }
+#}
+```
+
+```{r}
+#cuenta no na
+sum(!is.na(precios_q5_22_23_sr[4]))
+```
+
+#Estadística descriptiva
+
+```{r}
+library(moments)
+#corta a los precios de los datos que se consideraron para armar los modelos
+precios_q5_ed_full<-precios[,least_na$nombre]
+precios_q5_ed_full<-data.frame(precios_q5_ed_full)
+
+ed_full<-matrix(nrow=(length(precios_q5_ed_full)-1),ncol=8)
+
+for (i in 2:length((precios_q5_ed_full)-1))
+{
+  ed_full[i-1,1]<-colSums(!is.na((precios_q5_ed_full)))[i]
+  ed_full[i-1,2]<-colMeans(precios_q5_ed_full[-1], na.rm = TRUE)[i-1]
+  ed_full[i-1,3]<-sapply(precios_q5_ed_full, sd, na.rm = TRUE)[i]
+  ed_full[i-1,4]<-sapply(precios_q5_ed_full, min, na.rm = TRUE)[i]
+  ed_full[i-1,5]<-sapply(precios_q5_ed_full, max, na.rm = TRUE)[i]
+  ed_full[i-1,6]<-ed_full[i-1,5]-ed_full[i-1,4]
+  ed_full[i-1,7]<-sapply(precios_q5_ed_full, kurtosis, na.rm = TRUE)[i]
+  ed_full[i-1,8]<-sapply(precios_q5_ed_full, skewness, na.rm = TRUE)[i]
+}
+
+rownames(ed_full)<-colnames(precios_q5_ed_full)[-1]
+colnames(ed_full)<-c("Número de datos","Promedio","Desviación estándar","Mínimo","Máximo","Rango","Curtosis","Coeficiente de variación")
+```
+
+```{r}
+ed_3<-tibble::rownames_to_column(as.data.frame(ed_full),"a")
+```
+
+```{r}
+library("writexl")
+write_xlsx(ed_3,"estadistica_descriptiva_full.xlsx")
+```
+
+```{r}
+#summary(precios_q5_ed)
+#colSums(!is.na(precios_q5_ed))[2]
+#class(precios_q5_ed[2,2])
+#colMeans(precios_q5_ed[-1], na.rm = TRUE)
+sapply(precios_q5_ed, kurtosis, na.rm = TRUE)
+ed[10,5]-ed[10,4]
+ed[10,6]
+```
+
+```{r}
+library(moments)
+#corta a los precios de los datos que se consideraron para armar los modelos
+precios_q5_ed<-c(precios[1][(match("2018-01-01",precios$Fecha):(match("2021-12-31",precios$Fecha))),],precios[,nq5$nombre][(match("2018-01-01",precios$Fecha):(match("2021-12-31",precios$Fecha))),])
+precios_q5_ed<-data.frame(precios_q5_ed)
+
+ed<-matrix(nrow=(length(retornos_q5)-1),ncol=8)
+
+for (i in 2:length(retornos_q5))
+{
+  ed[i-1,1]<-colSums(!is.na((precios_q5_ed)))[i]
+  ed[i-1,2]<-colMeans(precios_q5_ed[-1], na.rm = TRUE)[i-1]
+  ed[i-1,3]<-sapply(precios_q5_ed, sd, na.rm = TRUE)[i]
+  ed[i-1,4]<-sapply(precios_q5_ed, min, na.rm = TRUE)[i]
+  ed[i-1,5]<-sapply(precios_q5_ed, max, na.rm = TRUE)[i]
+  ed[i-1,6]<-ed[i-1,5]-ed[i-1,4]
+  ed[i-1,7]<-sapply(precios_q5_ed, kurtosis, na.rm = TRUE)[i]
+  ed[i-1,8]<-sapply(precios_q5_ed, skewness, na.rm = TRUE)[i]
+}
+
+rownames(ed)<-colnames(precios_q5_18)[-1]
+colnames(ed)<-c("Número de datos","Promedio","Desviación estándar","Mínimo","Máximo","Rango","Curtosis","Coeficiente de variación")
+```
+
+```{r}
+ed_2<-tibble::rownames_to_column(as.data.frame(ed),"a")
+```
+
+```{r}
+library("writexl")
+write_xlsx(ed_2,"estadistica_descriptiva.xlsx")
+```
+
+#Modelo CAPM
+
+```{r}
+library(readxl)
+#Cálculo beta
+ipsa<-read_excel("ipsa.xlsx",sheet=1, na="-",col_types =c("date","numeric")) #precios diarios ipsa
+
+colnames(ipsa)<-c("Fecha", "ipsa")
+
+ipsa_18_21<-ipsa[(match("2018-01-01",ipsa$Fecha)):(match("2021-12-31",ipsa$Fecha)),]
+ipsa_19_21<-ipsa[(match("2019-01-01",ipsa$Fecha)):(match("2021-12-31",ipsa$Fecha)),]
+ipsa_20_21<-ipsa[(match("2020-01-01",ipsa$Fecha)):(match("2021-12-31",ipsa$Fecha)),]
+ipsa_21<-ipsa[(match("2021-01-01",ipsa$Fecha)):(match("2021-12-31",ipsa$Fecha)),]
+
+r_ipsa<-ipsa
+r_ipsa_18_21<-ipsa_18_21
+r_ipsa$ipsa<-NA
+r_ipsa_18_21$ipsa<-NA
+```
+
+```{r}
+#cálculo de los retornos
+for (i in 2:nrow(ipsa))
+{
+  r_ipsa[i-1,2]<-log(ipsa[i,2]/ipsa[i-1,2])
+}
+
+#cálculo de los retornos
+for (i in 2:nrow(ipsa_18_21))
+{
+  r_ipsa_18_21[i-1,2]<-log(ipsa_18_21[i,2]/ipsa_18_21[i-1,2])
+}
+
+r_ipsa_19_21<-r_ipsa_18_21[(match("2019-01-01",r_ipsa_18_21$Fecha)):(match("2021-12-31",r_ipsa_18_21$Fecha)),]
+r_ipsa_20_21<-r_ipsa_18_21[(match("2020-01-01",r_ipsa_18_21$Fecha)):(match("2021-12-31",r_ipsa_18_21$Fecha)),]
+r_ipsa_21<-r_ipsa_18_21[(match("2021-01-01",r_ipsa_18_21$Fecha)):(match("2021-12-31",r_ipsa_18_21$Fecha)),]
+```
+
+```{r}
+retornos_q5_18_21<-retornos[,nq5$nombre][(match("2018-01-01",retornos$Fecha):(match("2021-12-31",retornos$Fecha))),]
+retornos_q5_19_21<-retornos[,nq5$nombre][(match("2019-01-01",retornos$Fecha):(match("2021-12-31",retornos$Fecha))),]
+retornos_q5_20_21<-retornos[,nq5$nombre][(match("2020-01-01",retornos$Fecha):(match("2021-12-31",retornos$Fecha))),]
+retornos_q5_21<-retornos[,nq5$nombre][(match("2021-01-01",retornos$Fecha):(match("2021-12-31",retornos$Fecha))),]
+```
+
+```{r}
+beta_capm_18_21<-matrix(nrow=length(retornos_q5_18_21),ncol=1)
+beta_capm_19_21<-matrix(nrow=length(retornos_q5_18_21),ncol=1)
+beta_capm_20_21<-matrix(nrow=length(retornos_q5_18_21),ncol=1)
+beta_capm_21<-matrix(nrow=length(retornos_q5_18_21),ncol=1)
+
+rownames(beta_capm_18_21)<-colnames(retornos_q5_18_21)
+colnames(beta_capm_18_21)<-c("ipsa")
+rownames(beta_capm_19_21)<-colnames(retornos_q5_18_21)
+colnames(beta_capm_19_21)<-c("ipsa")
+rownames(beta_capm_20_21)<-colnames(retornos_q5_18_21)
+colnames(beta_capm_20_21)<-c("ipsa")
+rownames(beta_capm_21)<-colnames(retornos_q5_18_21)
+colnames(beta_capm_21)<-c("ipsa")
+```
+
+```{r}
+#cálculo beta
+for (j in 1:length(retornos_q5_18_21))
+{
+  mod<-lm(unlist(retornos_q5_18_21[j])~r_ipsa_18_21$ipsa)
+  beta_capm_18_21[j,1]<-mod$coefficients[2]
+}
+
+for (j in 1:length(retornos_q5_19_21))
+{
+  mod<-lm(unlist(retornos_q5_19_21[j])~r_ipsa_19_21$ipsa)
+  beta_capm_19_21[j,1]<-mod$coefficients[2]
+}
+
+for (j in 1:length(retornos_q5_20_21))
+{
+  mod<-lm(unlist(retornos_q5_20_21[j])~r_ipsa_20_21$ipsa)
+  beta_capm_20_21[j,1]<-mod$coefficients[2]
+}
+
+for (j in 1:length(retornos_q5_21))
+{
+  mod<-lm(unlist(retornos_q5_21[j])~r_ipsa_21$ipsa)
+  beta_capm_21[j,1]<-mod$coefficients[2]
+}
+```
+
+```{r}
+#rf
+rf<-read_excel("rf_chile.xlsx",sheet=1, na="-",col_types =c("date","numeric")) #rf diario
+
+rf_22_23<-rf[(match("2022-01-03",rf$Fecha):(match("2023-12-29",rf$Fecha))),]
+
+nrow(rf)
+nrow(rf_22_23)
+nrow(prediccion_18_22_23_final_2)
+```
+
+```{r}
+#creación df
+pred_capm_18_21<-prediccion_18_22_23_final_2
+pred_capm_18_21[2:length(pred_capm_18_21)]<-NA
+
+pred_capm_19_21<-prediccion_19_22_23_final_2
+pred_capm_19_21[2:length(pred_capm_19_21)]<-NA
+
+pred_capm_20_21<-prediccion_20_22_23_final_2
+pred_capm_20_21[2:length(pred_capm_20_21)]<-NA
+
+pred_capm_21<-prediccion_21_22_23_final_2
+pred_capm_21[2:length(pred_capm_21)]<-NA
+```
+
+```{r}
+#rf diaria
+rf_22_23_d<-rf_22_23
+
+for (i in 1:nrow(rf_22_23))
+{
+  rf_22_23_d[i,2]<-((1+rf_22_23[i,2])^(1/365))-1
+}
+```
+
+```{r}
+#corte ipsa 2022 y 2023 y subset a fechas rf
+r_ipsa_22_23<-r_ipsa[(match("2022-01-03",r_ipsa$Fecha):(match("2023-12-29",r_ipsa$Fecha))),]
+#pred_capm<-subset(prediccion_18_22_23_final_2, fecha %in% rf_22_23$Fecha)
+
+#como rf_22_23_d tiene menos observaciones que r_ipsa_22_23_d se hace un merge que hace coincidir
+rf_22_23_d_520<-merge(r_ipsa_22_23,rf_22_23_d, by="Fecha",all=TRUE)
+rf_22_23_d_520<-rf_22_23_d_520[-2]
+
+```
+
+```{r}
+#predicción capm
+for (j in 2:length(pred_capm_18_21))
+{
+  for (i in 1:nrow(pred_capm_18_21))
+  {
+    pred_capm_18_21[i,j]<-rf_22_23_d_520[i,2]+beta_capm_18_21[j-1,1]*(r_ipsa_22_23[i,2]-rf_22_23_d_520[i,2])
+    pred_capm_19_21[i,j]<-rf_22_23_d_520[i,2]+beta_capm_19_21[j-1,1]*(r_ipsa_22_23[i,2]-rf_22_23_d_520[i,2])
+    pred_capm_20_21[i,j]<-rf_22_23_d_520[i,2]+beta_capm_20_21[j-1,1]*(r_ipsa_22_23[i,2]-rf_22_23_d_520[i,2])
+    pred_capm_21[i,j]<-rf_22_23_d_520[i,2]+beta_capm_21[j-1,1]*(r_ipsa_22_23[i,2]-rf_22_23_d_520[i,2])
+  }
+}
+```
+
+```{r}
+plot(r_ipsa_21$ipsa,retornos_q5_21$SQM_B) 
+```
+
+#Pred CAPM no ponderada
+
+```{r}
+#df vacios para la prediccion no ponderada que hace match con los precios
+pred_capm_18_21_np<-pred_capm_18_21
+pred_capm_19_21_np<-pred_capm_19_21
+pred_capm_20_21_np<-pred_capm_20_21
+pred_capm_21_np<-pred_capm_21
+
+for (j in 2:length(pred_capm_18_21_np))
+{
+  for (i in 1:nrow(pred_capm_18_21_np))
+  {
+    pred_capm_18_21_np[i,j]<-NA
+    pred_capm_19_21_np[i,j]<-NA
+    pred_capm_20_21_np[i,j]<-NA
+    pred_capm_21_np[i,j]<-NA
+  }
+}
+
+
+for (j in 2:length(pred_capm_18_21))
+{
+  suma<-0
+  for (i in 2:nrow(pred_capm_18_21))
+  {
+    #si tiene dato
+    if (is.na(precios_q5_22_23_sr[i,j])==FALSE)
+    {
+      nona<-pred_capm_18_21[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        pred_capm_18_21_np[i,j]<-suma+nona
+      }
+      else
+      {
+        pred_capm_18_21_np[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(pred_capm_18_21[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(precios_q5_22_23_sr[i,j])==TRUE)
+      {
+        summ<-pred_capm_18_21[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+
+for (j in 2:length(pred_capm_19_21))
+{
+  suma<-0
+  for (i in 2:nrow(pred_capm_19_21))
+  {
+    #si tiene dato
+    if (is.na(precios_q5_22_23_sr[i,j])==FALSE)
+    {
+      nona<-pred_capm_19_21[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        pred_capm_19_21_np[i,j]<-suma+nona
+      }
+      else
+      {
+        pred_capm_19_21_np[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(pred_capm_19_21[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(precios_q5_22_23_sr[i,j])==TRUE)
+      {
+        summ<-pred_capm_19_21[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+
+for (j in 2:length(pred_capm_20_21))
+{
+  suma<-0
+  for (i in 2:nrow(pred_capm_20_21))
+  {
+    #si tiene dato
+    if (is.na(precios_q5_22_23_sr[i,j])==FALSE)
+    {
+      nona<-pred_capm_20_21[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        pred_capm_20_21_np[i,j]<-suma+nona
+      }
+      else
+      {
+        pred_capm_20_21_np[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(pred_capm_20_21[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(precios_q5_22_23_sr[i,j])==TRUE)
+      {
+        summ<-pred_capm_20_21[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+
+for (j in 2:length(pred_capm_21))
+{
+  suma<-0
+  for (i in 2:nrow(pred_capm_21))
+  {
+    #si tiene dato
+    if (is.na(precios_q5_22_23_sr[i,j])==FALSE)
+    {
+      nona<-pred_capm_21[i,j]
+      if (is.na(nona)==FALSE)
+      {
+        pred_capm_21_np[i,j]<-suma+nona
+      }
+      else
+      {
+        pred_capm_21_np[i,j]<-suma
+      }
+      suma<-0
+    }
+    if (is.na(pred_capm_21[i,j])==FALSE)
+    {
+      #si no tiene dato
+      if (is.na(precios_q5_22_23_sr[i,j])==TRUE)
+      {
+        summ<-pred_capm_21[i,j]
+        suma<-suma+summ
+      }
+    }
+  }
+}
+```
+
+```{r}
+library("writexl")
+#write_xlsx(pred_capm_18_21,"pred_capm_18_21.xlsx")
+#write_xlsx(pred_capm_19_21,"pred_capm_19_21.xlsx")
+#write_xlsx(pred_capm_20_21,"pred_capm_20_21.xlsx")
+#write_xlsx(pred_capm_21,"pred_capm_21.xlsx")
+```
+
+```{r}
+#df vacios para la prediccion no ponderada final
+pred_precios_capm_18_21<-pred_capm_18_21
+pred_precios_capm_19_21<-pred_capm_19_21
+pred_precios_capm_20_21<-pred_capm_20_21
+pred_precios_capm_21<-pred_capm_21
+
+for (j in 2:length(pred_precios_capm_18_21))
+{
+  for (i in 1:nrow(pred_capm_18_21))
+  {
+    pred_precios_capm_18_21[i,j]<-NA
+    pred_precios_capm_19_21[i,j]<-NA
+    pred_precios_capm_20_21[i,j]<-NA
+    pred_precios_capm_21[i,j]<-NA
+  }
+}
+
+#df precios originales: precios_q5_22_23
+
+#cálculo del precio
+#Pt = Pt-1 * exp(retorno t)
+for (j in 2:length(precios_q5_22_23_sr))
+{
+  nonna<-c()
+  for (i in 1:nrow(precios_q5_22_23_sr))
+  {
+    #si tiene dato
+    if (is.na(precios_q5_22_23_sr[i,j])==FALSE)
+    {
+      nonna<-append(nonna,i)
+    }
+  }
+  pred_precios_capm_18_21[nonna[1],j]<-precios_q5_22_23_sr[nonna[1],j]
+  pred_precios_capm_19_21[nonna[1],j]<-precios_q5_22_23_sr[nonna[1],j]
+  pred_precios_capm_20_21[nonna[1],j]<-precios_q5_22_23_sr[nonna[1],j]
+  pred_precios_capm_21[nonna[1],j]<-precios_q5_22_23_sr[nonna[1],j]
+  for (k in 2:length(nonna))
+  {
+    pred_precios_capm_18_21[nonna[k],j]<-precios_q5_22_23_sr[nonna[k-1],j]*exp(pred_capm_18_21_np[nonna[k],j])
+    pred_precios_capm_19_21[nonna[k],j]<-precios_q5_22_23_sr[nonna[k-1],j]*exp(pred_capm_19_21_np[nonna[k],j])
+    pred_precios_capm_20_21[nonna[k],j]<-precios_q5_22_23_sr[nonna[k-1],j]*exp(pred_capm_20_21_np[nonna[k],j])
+    pred_precios_capm_21[nonna[k],j]<-precios_q5_22_23_sr[nonna[k-1],j]*exp(pred_capm_21_np[nonna[k],j])
+  }
+}
+```
+
+```{r}
+#revisa pred precios capm
+precios_q5_22_23_sr[3,2]
+pred_capm_18_21_np[14,2]
+
+precios_q5_22_23_sr[4,3]
+pred_capm_18_21_np[7,3]
+
+precios_q5_22_23_sr[3,2]*exp(pred_capm_18_21_np[14,2])
+pred_precios_capm_18_21[14,2]
+
+precios_q5_22_23_sr[3,2]
+pred_capm_19_21_np[14,2]
+
+precios_q5_22_23_sr[4,3]
+pred_capm_19_21_np[7,3]
+
+precios_q5_22_23_sr[3,2]*exp(pred_capm_19_21_np[14,2])
+pred_precios_capm_19_21[14,2]
+
+precios_q5_22_23_sr[3,2]
+pred_capm_20_21_np[14,2]
+
+precios_q5_22_23_sr[4,3]
+pred_capm_20_21_np[7,3]
+
+precios_q5_22_23_sr[3,2]*exp(pred_capm_20_21_np[14,2])
+pred_precios_capm_20_21[14,2]
+
+precios_q5_22_23_sr[3,2]
+pred_capm_18_21_np[14,2]
+
+precios_q5_22_23_sr[4,3]
+pred_capm_21_np[7,3]
+
+precios_q5_22_23_sr[3,2]*exp(pred_capm_21_np[14,2])
+pred_precios_capm_21[14,2]
+```
+
+#MSE precios CAPM no ponderadas
+
+```{r}
+mse_precios_capm_np<-matrix(nrow=(length(pred_capm_18_21)-1),ncol=4)
+
+for (i in 2:length(precios_q5_22_23_sr))
+{
+  #2018
+  data<-data.frame(pred=pred_precios_capm_18_21[i],actual=precios_q5_22_23_sr[i])
+  colnames(data)<-c("pred","actual")
+  mse_precios_capm_np[i-1,1]<-MSE(data$pred,data$actual,na.rm=TRUE)
+  #2019
+  data<-data.frame(pred=pred_precios_capm_19_21[i],actual=precios_q5_22_23_sr[i])
+  colnames(data)<-c("pred","actual")
+  mse_precios_capm_np[i-1,2]<-MSE(data$pred,data$actual,na.rm=TRUE)
+  #2020
+    data<-data.frame(pred=pred_precios_capm_20_21[i],actual=precios_q5_22_23_sr[i])
+    colnames(data)<-c("pred","actual")
+    mse_precios_capm_np[i-1,3]<-MSE(data$pred,data$actual,na.rm=TRUE)
+    #2021
+    data<-data.frame(pred=pred_precios_capm_21[i],actual=precios_q5_22_23_sr[i])
+    colnames(data)<-c("pred","actual")
+    mse_precios_capm_np[i-1,4]<-MSE(data$pred,data$actual,na.rm=TRUE)
+}
+
+rownames(mse_precios_capm_np)<-colnames(precios_q5_18)[-1]
+colnames(mse_precios_capm_np)<-c("2018","2019","2020","2021")
+```
+
+```{r}
+library("MLmetrics")
+mape(unlist(precios_q5_22_23_sr[2]),unlist(pred_precios_18_22_23_final[2]))
+```
+
+```{r}
+library("MLmetrics")
+mape(na.omit(pred_precios_18_22_23_final$BANVIDA),na.omit(precios_q5_22_23_sr$BANVIDA))
+```
+
+```{r}
+mape_precios_capm_np<-matrix(nrow=(length(pred_capm_18_21)-1),ncol=4)
+
+for (i in 2:length(precios_q5_22_23_sr))
+{
+  #2018
+  data<-data.frame(pred=na.omit(pred_precios_capm_18_21[i]),actual=na.omit(precios_q5_22_23_sr[i]))
+  colnames(data)<-c("pred","actual")
+  mape_precios_capm_np[i-1,1]<-mape(data$actual,data$pred)
+  #2019
+  data<-data.frame(pred=na.omit(pred_precios_capm_19_21[i]),actual=na.omit(precios_q5_22_23_sr[i]))
+  colnames(data)<-c("pred","actual")
+  mape_precios_capm_np[i-1,2]<-mape(data$actual,data$pred)
+  #2020
+  data<-data.frame(pred=na.omit(pred_precios_capm_20_21[i]),actual=na.omit(precios_q5_22_23_sr[i]))
+  colnames(data)<-c("pred","actual")
+  mape_precios_capm_np[i-1,3]<-mape(data$actual,data$pred)
+  #2021
+  data<-data.frame(pred=na.omit(pred_precios_capm_21[i]),actual=na.omit(precios_q5_22_23_sr[i]))
+  colnames(data)<-c("pred","actual")
+  mape_precios_capm_np[i-1,4]<-mape(data$actual,data$pred)
+}
+
+rownames(mape_precios_capm_np)<-colnames(precios_q5_18)[-1]
+colnames(mape_precios_capm_np)<-c("2018","2019","2020","2021")
+```
+
+```{r}
+mse_precios_capm_np_2<-tibble::rownames_to_column(as.data.frame(mse_precios_capm_np),"a")
+mape_precios_capm_np_2<-tibble::rownames_to_column(as.data.frame(mape_precios_capm_np),"a")
+```
+
+```{r}
+library("writexl")
+write_xlsx(mse_precios_capm_np_2,"mse_precios_npond.xlsx")
+write_xlsx(mape_precios_capm_np_2,"mape_precios_npond.xlsx")
+```
+
+#Model Confidence Set
+
+```{r}
+library(MCS)
+mejor_modelo<-matrix(nrow=(ncol(pred_precios_18_22_23_final)-1),ncol=8)
+rownames(mejor_modelo)<-colnames(pred_precios_18_22_23_final[2:length(pred_precios_18_22_23_final)])
+colnames(mejor_modelo)<-c("P1","P2","P3","P4","C1","C2","C3","C4")
+
+rankings<-matrix(nrow=(ncol(pred_precios_18_22_23_final)-1),ncol=8)
+rownames(rankings)<-colnames(pred_precios_18_22_23_final[2:length(pred_precios_18_22_23_final)])
+colnames(rankings)<-c("P1","P2","P3","P4","C1","C2","C3","C4")
+
+valorp<-matrix(nrow=(ncol(pred_precios_18_22_23_final)-1),ncol=1)
+rownames(valorp)<-colnames(pred_precios_18_22_23_final[2:length(pred_precios_18_22_23_final)])
+colnames(valorp)<-c("valor-p")
+```
+
+```{r}
+for (j in 2:length(pred_precios_18_22_23_final))
+{
+  v_precios_q5_22_23_sr<-as.vector(na.omit(precios_q5_22_23_sr[,j]))
+  predicciones_t<-matrix(nrow=nrow(pred_precios_18_22_23_final),ncol=8)
+  for (i in 1:nrow(pred_precios_18_22_23_final))
+  {
+    predicciones_t[i,1]<-pred_precios_18_22_23_final[i,j]
+    predicciones_t[i,2]<-pred_precios_19_22_23_final[i,j]
+    predicciones_t[i,3]<-pred_precios_20_22_23_final[i,j]
+    predicciones_t[i,4]<-pred_precios_21_22_23_final[i,j]
+    predicciones_t[i,5]<-pred_precios_capm_18_21[i,j]
+    predicciones_t[i,6]<-pred_precios_capm_19_21[i,j]
+    predicciones_t[i,7]<-pred_precios_capm_20_21[i,j]
+    predicciones_t[i,8]<-pred_precios_capm_21[i,j]
+  }
+  
+  predicciones_1<-as.vector(na.omit(predicciones_t)[,1])
+  predicciones_2<-as.vector(na.omit(predicciones_t)[,2])
+  predicciones_3<-as.vector(na.omit(predicciones_t)[,3])
+  predicciones_4<-as.vector(na.omit(predicciones_t)[,4])
+  predicciones_5<-as.vector(na.omit(predicciones_t)[,5])
+  predicciones_6<-as.vector(na.omit(predicciones_t)[,6])
+  predicciones_7<-as.vector(na.omit(predicciones_t)[,7])
+  predicciones_8<-as.vector(na.omit(predicciones_t)[,8])
+  
+  loss_se_1<-LossLevel(v_precios_q5_22_23_sr,predicciones_1,which = "SE")
+  loss_se_2<-LossLevel(v_precios_q5_22_23_sr,predicciones_2,which = "SE")
+  loss_se_3<-LossLevel(v_precios_q5_22_23_sr,predicciones_3,which = "SE")
+  loss_se_4<-LossLevel(v_precios_q5_22_23_sr,predicciones_4,which = "SE")
+  loss_se_5<-LossLevel(v_precios_q5_22_23_sr,predicciones_5,which = "SE")
+  loss_se_6<-LossLevel(v_precios_q5_22_23_sr,predicciones_6,which = "SE")
+  loss_se_7<-LossLevel(v_precios_q5_22_23_sr,predicciones_7,which = "SE")
+  loss_se_8<-LossLevel(v_precios_q5_22_23_sr,predicciones_8,which = "SE")
+  
+  loss_se<-matrix(c(loss_se_1,loss_se_2,loss_se_3,loss_se_4,loss_se_5,loss_se_6,loss_se_7,loss_se_8),ncol=8)
+  
+  MCS_2<-MCSprocedure(loss_se,alpha=0.15,B=5000,cl=NULL,ram.allocation = TRUE, statistic = "Tmax", k = NULL, min.k = 3,verbose = TRUE)
+  for (l in 1:length(MCS_2@Info$model.names))
+  {
+    mejor_modelo[j-1,as.numeric(substr(MCS_2@Info$model.names[l],7,7))]<-MCS_2@show[,3][l]
+    rankings[j-1,as.numeric(substr(MCS_2@Info$model.names[l],7,7))]<-MCS_2@show[,1][l]
+  }
+  valorp[j-1,1]<-MCS_2@Info$mcs_pvalue
+}
+```
+
+#writexl mcs
+
+```{r}
+mejor_modelo_2<-tibble::rownames_to_column(as.data.frame(mejor_modelo),"a")
+rankings_2<-tibble::rownames_to_column(as.data.frame(rankings),"a")
+```
+
+```{r}
+library("writexl")
+write_xlsx(mejor_modelo_2,"mejor_modelo_chile.xlsx")
+write_xlsx(rankings_2,"rankings_chile.xlsx")
+```
+
+#mcs mape
+
+```{r}
+library(MCS)
+mejor_modelo_mape<-matrix(nrow=(ncol(pred_precios_18_22_23_final)-1),ncol=8)
+rownames(mejor_modelo_mape)<-colnames(pred_precios_18_22_23_final[2:length(pred_precios_18_22_23_final)])
+colnames(mejor_modelo_mape)<-c("P1","P2","P3","P4","C1","C2","C3","C4")
+
+rankings_mape<-matrix(nrow=(ncol(pred_precios_18_22_23_final)-1),ncol=8)
+rownames(rankings_mape)<-colnames(pred_precios_18_22_23_final[2:length(pred_precios_18_22_23_final)])
+colnames(rankings_mape)<-c("P1","P2","P3","P4","C1","C2","C3","C4")
+
+valorp_mape<-matrix(nrow=(ncol(pred_precios_18_22_23_final)-1),ncol=1)
+rownames(valorp_mape)<-colnames(pred_precios_18_22_23_final[2:length(pred_precios_18_22_23_final)])
+colnames(valorp_mape)<-c("valor-p")
+
+losses_mape<-list()
+```
+
+```{r}
+for (j in 2:16)
+{
+  v_precios_q5_22_23_sr<-as.vector(na.omit(precios_q5_22_23_sr[,j]))
+  predicciones_t<-matrix(nrow=nrow(pred_precios_18_22_23_final),ncol=8)
+  for (i in 1:nrow(pred_precios_18_22_23_final))
+  {
+    predicciones_t[i,1]<-pred_precios_18_22_23_final[i,j]
+    predicciones_t[i,2]<-pred_precios_19_22_23_final[i,j]
+    predicciones_t[i,3]<-pred_precios_20_22_23_final[i,j]
+    predicciones_t[i,4]<-pred_precios_21_22_23_final[i,j]
+    predicciones_t[i,5]<-pred_precios_capm_18_21[i,j]
+    predicciones_t[i,6]<-pred_precios_capm_19_21[i,j]
+    predicciones_t[i,7]<-pred_precios_capm_20_21[i,j]
+    predicciones_t[i,8]<-pred_precios_capm_21[i,j]
+  }
+
+  predicciones_1<-as.vector(na.omit(predicciones_t)[,1])
+  predicciones_2<-as.vector(na.omit(predicciones_t)[,2])
+  predicciones_3<-as.vector(na.omit(predicciones_t)[,3])
+  predicciones_4<-as.vector(na.omit(predicciones_t)[,4])
+  predicciones_5<-as.vector(na.omit(predicciones_t)[,5])
+  predicciones_6<-as.vector(na.omit(predicciones_t)[,6])
+  predicciones_7<-as.vector(na.omit(predicciones_t)[,7])
+  predicciones_8<-as.vector(na.omit(predicciones_t)[,8])
+  
+  loss_mape_1<-LossLevel(v_precios_q5_22_23_sr,predicciones_1,which = "AE")
+  loss_mape_2<-LossLevel(v_precios_q5_22_23_sr,predicciones_2,which = "AE")
+  loss_mape_3<-LossLevel(v_precios_q5_22_23_sr,predicciones_3,which = "AE")
+  loss_mape_4<-LossLevel(v_precios_q5_22_23_sr,predicciones_4,which = "AE")
+  loss_mape_5<-LossLevel(v_precios_q5_22_23_sr,predicciones_5,which = "AE")
+  loss_mape_6<-LossLevel(v_precios_q5_22_23_sr,predicciones_6,which = "AE")
+  loss_mape_7<-LossLevel(v_precios_q5_22_23_sr,predicciones_7,which = "AE")
+  loss_mape_8<-LossLevel(v_precios_q5_22_23_sr,predicciones_8,which = "AE")
+  
+  loss_mape<-matrix(c(loss_mape_1,loss_mape_2,loss_mape_3,loss_mape_4,loss_mape_5,loss_mape_6,loss_mape_7,loss_mape_8),ncol=8)
+  for (a in 1:nrow(loss_mape))
+  {
+    loss_mape[a,]<-loss_mape[a,]/v_precios_q5_22_23_sr[a]
+  }
+  losses_mape[[j-1]]<-loss_mape
+}
+```
+
+```{r}
+v_precios_q5_22_23_sr[3]
+predicciones_1[3]
+abs(predicciones_1[3]-v_precios_q5_22_23_sr[3])
+
+abs(predicciones_1[3]-v_precios_q5_22_23_sr[3])/v_precios_q5_22_23_sr[3]
+abs(predicciones_4[4]-v_precios_q5_22_23_sr[4])/v_precios_q5_22_23_sr[4]
+
+loss_mape[3,1]
+loss_mape[4,4]
+
+losses_mape[[15]][3,1]
+losses_mape[[15]][4,4]
+```
+
+```{r}
+for (j in 2:16) #length(pred_precios_18_22_23_final))
+{
+  MCS_3<-MCSprocedure(losses_mape[[j-1]],alpha=0.15,B=5000,cl=NULL,ram.allocation = TRUE, statistic = "Tmax", k = NULL, min.k = 3,verbose = TRUE)
+
+  for (l in 1:length(MCS_3@Info$model.names))
+  {
+    n<-as.numeric(substr(MCS_3@Info$model.names[l],7,7))
+    mejor_modelo_mape[j-1,n]<-MCS_3@show[,3][l]
+    rankings_mape[j-1,n]<-MCS_3@show[,1][l]
+  }
+  valorp_mape[j-1,1]<-MCS_3@Info$mcs_pvalue
+}
+```
+
+#writexl mcs mape
+
+```{r}
+mejor_modelo_3<-tibble::rownames_to_column(as.data.frame(mejor_modelo_mape),"a")
+rankings_3<-tibble::rownames_to_column(as.data.frame(rankings_mape),"a")
+```
+
+```{r}
+library("writexl")
+write_xlsx(mejor_modelo_3,"mejor_modelo_mape_chile.xlsx")
+write_xlsx(rankings_3,"rankings_mape_chile.xlsx")
+```
+
+#mse new
+
+```{r}
+losses<-list()
+
+
+for (j in 2:length(pred_precios_18_22_23_final))
+{
+  v_precios_q5_22_23_sr<-as.vector(na.omit(precios_q5_22_23_sr[,j]))
+  predicciones_t<-matrix(nrow=nrow(pred_precios_18_22_23_final),ncol=8)
+  for (i in 1:nrow(pred_precios_18_22_23_final))
+  {
+    predicciones_t[i,1]<-pred_precios_18_22_23_final[i,j]
+    predicciones_t[i,2]<-pred_precios_19_22_23_final[i,j]
+    predicciones_t[i,3]<-pred_precios_20_22_23_final[i,j]
+    predicciones_t[i,4]<-pred_precios_21_22_23_final[i,j]
+    predicciones_t[i,5]<-pred_precios_capm_18_21[i,j]
+    predicciones_t[i,6]<-pred_precios_capm_19_21[i,j]
+    predicciones_t[i,7]<-pred_precios_capm_20_21[i,j]
+    predicciones_t[i,8]<-pred_precios_capm_21[i,j]
+  }
+  
+  predicciones_1<-as.vector(na.omit(predicciones_t)[,1])
+  predicciones_2<-as.vector(na.omit(predicciones_t)[,2])
+  predicciones_3<-as.vector(na.omit(predicciones_t)[,3])
+  predicciones_4<-as.vector(na.omit(predicciones_t)[,4])
+  predicciones_5<-as.vector(na.omit(predicciones_t)[,5])
+  predicciones_6<-as.vector(na.omit(predicciones_t)[,6])
+  predicciones_7<-as.vector(na.omit(predicciones_t)[,7])
+  predicciones_8<-as.vector(na.omit(predicciones_t)[,8])
+  
+  loss_se_1<-LossLevel(v_precios_q5_22_23_sr,predicciones_1,which = "SE")
+  loss_se_2<-LossLevel(v_precios_q5_22_23_sr,predicciones_2,which = "SE")
+  loss_se_3<-LossLevel(v_precios_q5_22_23_sr,predicciones_3,which = "SE")
+  loss_se_4<-LossLevel(v_precios_q5_22_23_sr,predicciones_4,which = "SE")
+  loss_se_5<-LossLevel(v_precios_q5_22_23_sr,predicciones_5,which = "SE")
+  loss_se_6<-LossLevel(v_precios_q5_22_23_sr,predicciones_6,which = "SE")
+  loss_se_7<-LossLevel(v_precios_q5_22_23_sr,predicciones_7,which = "SE")
+  loss_se_8<-LossLevel(v_precios_q5_22_23_sr,predicciones_8,which = "SE")
+  
+  loss_se<-matrix(c(loss_se_1,loss_se_2,loss_se_3,loss_se_4,loss_se_5,loss_se_6,loss_se_7,loss_se_8),ncol=8)
+  
+  losses[[j-1]]<-loss_se
+}
+```
+
+```{r}
+sum(losses[[1]][,1])
+nrow(losses[[1]])
+sum(losses[[1]][,1])/nrow(losses[[1]])
+
+(precios_q5_22_23_sr[15,2]-pred_precios_18_22_23_final[15,2])^2
+(precios_q5_22_23_sr[14,2]-pred_precios_18_22_23_final[14,2])^2
+```
+
+```{r}
+sum(losses[[3]][,2])
+nrow(losses[[3]])
+ 
+sum(losses[[3]][,2])/nrow(losses[[3]])    
+```
+
+```{r}
+mse_new<-matrix(nrow=(ncol(pred_precios_18_22_23_final)-1),ncol=8)
+rownames(mse_new)<-colnames(pred_precios_18_22_23_final[2:length(pred_precios_18_22_23_final)])
+colnames(mse_new)<-c("P1","P2","P3","P4","C1","C2","C3","C4")
+```
+
+```{r}
+for (j in 1:length(losses))
+{
+  for (i in 1:8)
+  {
+    mse_new[j,i]<-sum(losses[[j]][,i])/nrow(losses[[j]])  
+  }
+}
+```
+
+#writexl mse_new
+
+```{r}
+mse_new_2<-tibble::rownames_to_column(as.data.frame(mse_new),"a")
+```
+
+```{r}
+library("writexl")
+write_xlsx(mse_new_2,"mse_new_chile.xlsx")
+```
+
+#revision mape
+
+```{r}
+sum(losses_mape[[1]][,1])
+nrow(losses_mape[[1]])
+ 
+sum(losses_mape[[1]][,1])/nrow(losses_mape[[1]])*100  
+```
