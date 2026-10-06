@@ -28,10 +28,10 @@ La predicción del modelo propuesto se compara con la del modelo CAPM mediante M
 * **Lenguaje & Entorno:** R / Quarto (`.qmd`) / RStudio
 * **Habilidades Utilizadas:**
     * Estructuras de datos: Matrices, dataframes, listas, etc.
-    * Importación, limpieza y manipulación de datos: Utilizando liberías como `readr`,`tidyverse`, `dplyr` y `data.table`.
+    * Importación, limpieza y manipulación de datos: Utilizando librerías como `readr`,`tidyverse`, `dplyr` y `data.table`.
     * Condicionales `if`, iteraciones `for` y funciones.
     * Modelamiento mediante regresión lineal múltiple en ciclo `for` y entrenamiento y testeo de modelo.
-    * Visualización de datos: Utilizando liberías como `ggplot2`.
+    * Visualización de datos: Utilizando librerías como `ggplot2`.
     * Exportación de resultados como archivo de Excel.
 
 
